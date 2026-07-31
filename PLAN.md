@@ -74,13 +74,15 @@ Design first, then enforce. This is the layer every backtest's honesty rests on.
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
 | P2.1 | [ER] Bitemporal design doc → `DECISIONS.md`: column semantics (`valid_from`, `valid_to`, `knowledge_time`), restatement representation, delete/correction handling, timezone policy (all UTC, `TIMESTAMPTZ`), index strategy for as-of access, hypertable partitioning choices | G1 | M | DONE (D-011) |
-| P2.2 | `BitemporalMixin` + declarative base; first fact tables (securities master, prices) carrying the three columns; Alembic migration | P2.1 | M | TODO |
-| P2.3 | Query layer: `as_of(as_of_ts)` async context yielding a scoped session that transparently rewrites every SELECT on bitemporal tables to the versioned form (`knowledge_time <= as_of`, latest-knowledge-wins, retraction masking). Write path: `knowledge_time` is **writer-supplied under each connector's declared policy — never server-stamped** (D-011; server stamping would falsify backfills) | P2.2 | L | TODO |
-| P2.4 | Bypass prevention: mechanism making direct table reads outside the query layer fail from application code (session-factory guard + SQLAlchemy event assertion + lint rule banning raw `select()` on fact tables outside `db/`), decision logged | P2.3 | L | TODO |
-| P2.5 | Hypertables on time-series fact tables partitioned on `valid_from` + composite index `(entity_id, valid_from, knowledge_time DESC)` (D-011 physical layout); DB-level append-only enforcement; migration + EXPLAIN sanity check that outer quals push down into the versioned subquery | P2.2 | M | TODO |
-| P2.6 | Hypothesis property suite: random facts (random valid intervals, knowledge times) + random as-of queries; 10,000 cases; assert no returned row has `knowledge_time > as_of`; runs against real Postgres via Testcontainers | P2.3 | L | TODO |
-| P2.7 | Bypass-impossibility test: prove application code cannot read fact tables without the query layer (import-time + runtime enforcement both exercised) | P2.4 | M | TODO |
-| P2.8 | **Gate G2:** P2.6 zero failures + P2.7 passing, in CI | P2.6, P2.7 | S | TODO |
+| P2.2 | `BitemporalMixin` + declarative base; first fact tables (securities master, prices) carrying the three columns; Alembic migration | P2.1 | M | DONE |
+| P2.3 | Query layer: `as_of(as_of_ts)` async context yielding a scoped session that transparently rewrites every SELECT on bitemporal tables to the versioned form (`knowledge_time <= as_of`, latest-knowledge-wins, retraction masking). Write path: `knowledge_time` is **writer-supplied under each connector's declared policy — never server-stamped** (D-011; server stamping would falsify backfills) | P2.2 | L | DONE |
+| P2.4 | Bypass prevention: mechanism making direct table reads outside the query layer fail from application code (session-factory guard + SQLAlchemy event assertion + lint rule banning raw `select()` on fact tables outside `db/`), decision logged | P2.3 | L | DONE |
+| P2.5 | Hypertables on time-series fact tables partitioned on `valid_from` + composite index `(entity_id, valid_from, knowledge_time DESC)` (D-011 physical layout); DB-level append-only enforcement; migration + EXPLAIN sanity check that outer quals push down into the versioned subquery | P2.2 | M | DONE |
+| P2.6 | Hypothesis property suite: random facts (random valid intervals, knowledge times) + random as-of queries; 10,000 cases; assert no returned row has `knowledge_time > as_of`; runs against real Postgres via Testcontainers | P2.3 | L | DONE (81,121 cases, 0 failures) |
+| P2.7 | Bypass-impossibility test: prove application code cannot read fact tables without the query layer (import-time + runtime enforcement both exercised) | P2.4 | M | DONE |
+| P2.8 | **Gate G2:** P2.6 zero failures + P2.7 passing, in CI | P2.6, P2.7 | S | GATE-PASSED (2026-07-31, see PROGRESS) |
+| P2.9 | EXPLAIN verification that outer quals push down into the versioned subquery past `DISTINCT ON` (P2.5's stated check, not yet done — performance, not correctness; audit flagged joins constraining event time via another table as the likely non-pushdown case) | P2.8 | S | TODO |
+| P2.10 | Retraction-row payload hygiene: retractions must fabricate NOT NULL payload columns; mark/enforce placeholder payloads so they cannot be mistaken for data (audit finding, I3-adjacent) | P2.8 | S | TODO |
 
 ## Phase 3 — Data ingestion
 

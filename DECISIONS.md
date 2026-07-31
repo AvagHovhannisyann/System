@@ -159,3 +159,44 @@ CI; a hand-built session raises at runtime; `as_of` sessions pass.
 - **Partitioning on `knowledge_time`** — see Physical layout.
 - **Views per as-of date** — unbounded view proliferation, and dynamic as-of
   parameters don't fit static views.
+
+## D-012 — Phase 2 implementation amendments to D-011 (2026-07-31)
+
+D-011 was written before implementation. Four things changed on contact with the
+code; each is recorded here so the design doc and the code cannot silently diverge.
+
+**1. Append-only is enforced by triggers, not role grants.** D-011 specified "no
+UPDATE/DELETE grants for the application role" plus "Alembic migrations run as a
+separate role". The compose stack runs a single `POSTGRES_USER`, and migrations run
+in the backend entrypoint as that same role (D-009), so grants would bind nothing.
+Migration 0003 (fact tables) and 0004 (identity anchor) install `BEFORE UPDATE OR
+DELETE` row triggers instead: role-independent, and they propagate to Timescale
+chunks so direct-chunk mutation is refused too. **Residual weakness, stated plainly:**
+the single owning role can `ALTER TABLE ... DISABLE TRIGGER` or `DROP TRIGGER`, which
+true role separation would have prevented. Closing it requires a second DB role — a
+deployment change, logged as a backlog item rather than done silently here.
+
+**2. Enforcement is two-surface, not one.** D-011's layer 2 assumed the ORM
+`do_orm_execute` hook sufficed. An adversarial review proved it does not: raw Core
+access via `session.connection()` and the publicly exported admin engine read fact
+tables unversioned with no error, and SELECTs embedded in INSERT/UPDATE statements
+skipped the hook entirely (the exact "materialize features FROM price_bar" pattern
+Phases 4–6 will write). A **Core-level guard** now runs on every engine `backend.db`
+creates, vetting compiled statements and textual SQL. Sanctioned executions carry a
+module-private token object compared by identity — the option *name* is public and
+useless without the token. Migrations and test resets run on a module-private
+unguarded engine, itself banned from import outside `backend/db`.
+
+**3. Fail-closed beats analyze-harder.** Textual SQL cannot be structurally analyzed,
+so it is name-scanned with a conservative word-boundary regex and *rejected* on
+match. This has known false positives — a column literal spelling a fact-table name,
+or `TRUNCATE price_bar` — which are accepted deliberately: the failure mode is a loud
+error, never a silent leak. The same principle governs aliased entities and compound
+selects, which raise rather than execute unversioned.
+
+**4. Temporal values are validated aware at the boundary.** Not in D-011, added
+because asyncpg silently reinterprets naive datetimes in *host-local* time — a
+silent hours-scale I1 violation invisible to every test. Writer-supplied temporal
+values must be timezone-aware or raise before I/O, and PG `'infinity'` round-trips
+through an aware sentinel instead of leaking the naive `datetime.max` asyncpg
+returns (which raises `TypeError` on any aware comparison).
