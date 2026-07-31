@@ -63,9 +63,9 @@ Deliverables: compose stack (TimescaleDB, Redis, backend, frontend), Pydantic Se
 |---|---|---|---|---|
 | P1.1 | Backend scaffold: root `pyproject.toml` (uv), `backend` package (`core/`, `db/`, `api/`, `tests/`), FastAPI app factory, Pydantic Settings (`core/config.py`), structlog JSON logging + correlation-ID middleware (`core/logging.py`), `/api/health` (DB+Redis component checks), SQLAlchemy 2.0 async engine + session, Alembic baseline migration, ruff (incl. pydocstyle) + `mypy --strict` + pytest all passing | P0.1 | L | DONE |
 | P1.2 | Frontend scaffold: Next.js 15 App Router, TS strict, Tailwind, shadcn/ui, TanStack Query; app shell + system-status page reading `/api/health`; `tsc --noEmit`, eslint, `next build` all passing. Functional UI only — visual design is Fabel's lane (see D-006) | P0.1 | M | DONE |
-| P1.3 | Containers: backend Dockerfile (uv, non-root, entrypoint runs `alembic upgrade head`), frontend Dockerfile (standalone), `docker-compose.yml` (timescaledb-pg16, redis, backend, frontend; healthchecks, `depends_on: condition: service_healthy`), `.env.example` | P1.1, P1.2 | M | WIP (drafted; verified at P1.5) |
-| P1.4 | CI + hooks: GitHub Actions — backend job (ruff, `mypy --strict`, pytest+coverage, I6 skip-guard), frontend job (eslint, `tsc --noEmit`, `next build`), dependency-scan job (pip-audit, audit-ci w/ justified allowlist — D-010); pre-commit config (.env-guard script, ruff, key-pattern grep) | P1.1, P1.2 | M | WIP (drafted; verified at P1.5) |
-| P1.5 | **Gate G1:** clean-clone `docker compose up` verified (health endpoint answers, frontend serves, migrations applied); CI green on the pushed branch | P1.3, P1.4 | S | TODO |
+| P1.3 | Containers: backend Dockerfile (uv, non-root, entrypoint runs `alembic upgrade head`), frontend Dockerfile (standalone), `docker-compose.yml` (timescaledb-pg16, redis, backend, frontend; healthchecks, `depends_on: condition: service_healthy`), `.env.example` | P1.1, P1.2 | M | DONE |
+| P1.4 | CI + hooks: GitHub Actions — backend job (ruff, `mypy --strict`, pytest+coverage, I6 skip-guard), frontend job (eslint, `tsc --noEmit`, `next build`), dependency-scan job (pip-audit, audit-ci w/ justified allowlist — D-010); pre-commit config (.env-guard script, ruff, key-pattern grep) | P1.1, P1.2 | M | DONE |
+| P1.5 | **Gate G1:** clean-clone `docker compose up` verified (health endpoint answers, frontend serves, migrations applied); CI green on the pushed branch | P1.3, P1.4 | S | GATE-PASSED (2026-07-31, see PROGRESS) |
 
 ## Phase 2 — Bitemporal store  [ER]
 
