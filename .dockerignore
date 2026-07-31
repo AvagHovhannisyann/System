@@ -1,0 +1,17 @@
+.git
+.venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+__pycache__
+node_modules
+frontend/node_modules
+frontend/.next
+frontend/out
+.env
+.env.*
+!.env.example
+data
+mlruns
+mlartifacts
+*.log
