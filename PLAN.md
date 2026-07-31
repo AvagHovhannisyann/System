@@ -73,7 +73,7 @@ Design first, then enforce. This is the layer every backtest's honesty rests on.
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P2.1 | [ER] Bitemporal design doc → `DECISIONS.md`: column semantics (`valid_from`, `valid_to`, `knowledge_time`), restatement representation, delete/correction handling, timezone policy (all UTC, `TIMESTAMPTZ`), index strategy for as-of access, hypertable partitioning choices | G1 | M | TODO |
+| P2.1 | [ER] Bitemporal design doc → `DECISIONS.md`: column semantics (`valid_from`, `valid_to`, `knowledge_time`), restatement representation, delete/correction handling, timezone policy (all UTC, `TIMESTAMPTZ`), index strategy for as-of access, hypertable partitioning choices | G1 | M | DONE (D-011) |
 | P2.2 | `BitemporalMixin` + declarative base; first fact tables (securities master, prices) carrying the three columns; Alembic migration | P2.1 | M | TODO |
 | P2.3 | Query layer: `as_of(session, as_of_ts)` returning a scoped session that transparently constrains every SELECT on bitemporal tables (`knowledge_time <= as_of`, valid-interval predicate); write path stamps `knowledge_time` server-side | P2.2 | L | TODO |
 | P2.4 | Bypass prevention: mechanism making direct table reads outside the query layer fail from application code (session-factory guard + SQLAlchemy event assertion + lint rule banning raw `select()` on fact tables outside `db/`), decision logged | P2.3 | L | TODO |
