@@ -14,7 +14,9 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project --no-dev
 
-COPY alembic.ini ./
+# README.md is project metadata (pyproject readme field) — hatchling needs it
+# to build the package in the next sync step.
+COPY alembic.ini README.md ./
 COPY backend ./backend
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
