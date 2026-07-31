@@ -75,9 +75,9 @@ Design first, then enforce. This is the layer every backtest's honesty rests on.
 |---|---|---|---|---|
 | P2.1 | [ER] Bitemporal design doc → `DECISIONS.md`: column semantics (`valid_from`, `valid_to`, `knowledge_time`), restatement representation, delete/correction handling, timezone policy (all UTC, `TIMESTAMPTZ`), index strategy for as-of access, hypertable partitioning choices | G1 | M | DONE (D-011) |
 | P2.2 | `BitemporalMixin` + declarative base; first fact tables (securities master, prices) carrying the three columns; Alembic migration | P2.1 | M | TODO |
-| P2.3 | Query layer: `as_of(session, as_of_ts)` returning a scoped session that transparently constrains every SELECT on bitemporal tables (`knowledge_time <= as_of`, valid-interval predicate); write path stamps `knowledge_time` server-side | P2.2 | L | TODO |
+| P2.3 | Query layer: `as_of(as_of_ts)` async context yielding a scoped session that transparently rewrites every SELECT on bitemporal tables to the versioned form (`knowledge_time <= as_of`, latest-knowledge-wins, retraction masking). Write path: `knowledge_time` is **writer-supplied under each connector's declared policy — never server-stamped** (D-011; server stamping would falsify backfills) | P2.2 | L | TODO |
 | P2.4 | Bypass prevention: mechanism making direct table reads outside the query layer fail from application code (session-factory guard + SQLAlchemy event assertion + lint rule banning raw `select()` on fact tables outside `db/`), decision logged | P2.3 | L | TODO |
-| P2.5 | Hypertables on time-series fact tables + composite indices `(entity, knowledge_time DESC)` / `(knowledge_time, valid_from)`; migration + EXPLAIN sanity check | P2.2 | M | TODO |
+| P2.5 | Hypertables on time-series fact tables partitioned on `valid_from` + composite index `(entity_id, valid_from, knowledge_time DESC)` (D-011 physical layout); DB-level append-only enforcement; migration + EXPLAIN sanity check that outer quals push down into the versioned subquery | P2.2 | M | TODO |
 | P2.6 | Hypothesis property suite: random facts (random valid intervals, knowledge times) + random as-of queries; 10,000 cases; assert no returned row has `knowledge_time > as_of`; runs against real Postgres via Testcontainers | P2.3 | L | TODO |
 | P2.7 | Bypass-impossibility test: prove application code cannot read fact tables without the query layer (import-time + runtime enforcement both exercised) | P2.4 | M | TODO |
 | P2.8 | **Gate G2:** P2.6 zero failures + P2.7 passing, in CI | P2.6, P2.7 | S | TODO |
@@ -88,7 +88,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P3.1 | Connector framework: base class (retry, rate-limit, incremental checkpoint, DQ metrics emission), Celery + beat wiring, ingestion-run tracking table | G2 | L | TODO |
+| P3.1 | Connector framework: base class (retry, rate-limit, incremental checkpoint, DQ metrics emission), Celery + beat wiring, ingestion-run tracking table marking each run `backfill\|live` with a DQ check flagging live runs whose knowledge_times trail ingestion beyond the source's declared lag (D-011 compensating control), rejection/flagging of future `knowledge_time` at write, and the **open-interval supersession contract**: a connector closing an open-ended fact writes a later-knowledge correction row with the same `valid_from` and a bounded `valid_to` (audit finding — until written, consecutive open intervals overlap) | G2 | L | TODO |
 | P3.2 | SEC EDGAR connector: filings index + documents, **acceptance timestamps** as `knowledge_time`, incremental sync | P3.1 | L | TODO |
 | P3.3 | Corporate actions connector (splits, dividends, delistings, ticker changes, M&A) — **must include delisted securities** | P3.1, B1 | L | BLOCKED(B1) |
 | P3.4 | Daily OHLCV connector with full adjustment history (raw + adjustment factors stored separately) | P3.1, B1 | L | BLOCKED(B1) |
