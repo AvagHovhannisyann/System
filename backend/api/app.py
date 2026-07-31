@@ -12,7 +12,7 @@ from backend.api.middleware import CorrelationIdMiddleware
 from backend.api.routes.health import router as health_router
 from backend.core.config import Settings, get_settings
 from backend.core.logging import configure_logging
-from backend.db.engine import create_db_engine
+from backend.db import create_admin_engine
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -22,13 +22,14 @@ if TYPE_CHECKING:
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Create shared clients on startup and dispose of them on shutdown.
 
-    Stores the async database engine at ``app.state.db_engine`` and the
-    Redis client at ``app.state.redis``. Both are lazy: no network I/O
+    Stores an *admin* async database engine at ``app.state.db_engine`` (used
+    only by the health probe — never a fact-table read path, per D-011) and
+    the Redis client at ``app.state.redis``. Both are lazy: no network I/O
     happens until first use, so startup succeeds even when the backing
     services are down (the health endpoint then reports them as down).
     """
     settings = get_settings()
-    engine = create_db_engine(settings)
+    engine = create_admin_engine(settings)
     redis: Redis = Redis.from_url(settings.redis_url)
     app.state.db_engine = engine
     app.state.redis = redis

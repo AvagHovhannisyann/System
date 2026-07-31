@@ -14,10 +14,10 @@ from typing import TYPE_CHECKING
 
 from alembic import context
 from sqlalchemy import pool
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from backend.core.config import get_settings
 from backend.db.base import Base
+from backend.db.engine import _create_migration_engine
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
@@ -61,10 +61,13 @@ def do_run_migrations(connection: Connection) -> None:
 async def run_async_migrations() -> None:
     """Create an async engine, run migrations through it, and dispose of it.
 
-    ``NullPool`` because a migration run needs exactly one short-lived
-    connection.
+    The engine comes from the module-private *migration* factory — the one
+    engine deliberately created **without** the Core-level bitemporal read
+    guard, because migration DDL necessarily names fact tables (e.g.
+    revision 0003's ``create_hypertable('price_bar', ...)``). ``NullPool``
+    because a migration run needs exactly one short-lived connection.
     """
-    connectable = create_async_engine(_database_url(), poolclass=pool.NullPool)
+    connectable = _create_migration_engine(poolclass=pool.NullPool)
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await connectable.dispose()
