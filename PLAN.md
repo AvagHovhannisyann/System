@@ -34,8 +34,13 @@
 ```
 P1 ─→ P2 ─→ P3 ─→ P4 ─→ P5 ─→ P6 ─→ P8 ─→ P9 ─→ P10 ─→ P11 ─→ P12
              │                 ↑
-             └───→ P7 (LLM) ───┘        (P7 features feed P8; P7 needs P2+P3 docs,
-                                         independent of P4–P6 — parallel track)
+             └───→ P7 (LLM) ───┘        (P7 features feed P8 *when G7 passes*; P7 needs
+                                         P2+P3 docs, independent of P4–P6 — parallel
+                                         track. P8 does NOT block on P7: B3/B4 could
+                                         stall it indefinitely. Every training run
+                                         records its feature-set version in the ledger,
+                                         so baseline-only runs and LLM-augmented runs
+                                         are distinct experiments.)
 CC.* cross-cutting tasks slot in where their "after" column says.
 ```
 
@@ -56,10 +61,10 @@ Deliverables: compose stack (TimescaleDB, Redis, backend, frontend), Pydantic Se
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P1.1 | Backend scaffold: root `pyproject.toml` (uv), `backend` package (`core/`, `db/`, `api/`, `tests/`), FastAPI app factory, Pydantic Settings (`core/config.py`), structlog JSON logging + correlation-ID middleware (`core/logging.py`), `/api/health` (DB+Redis component checks), SQLAlchemy 2.0 async engine + session, Alembic baseline migration, ruff + `mypy --strict` + pytest all passing | P0.1 | L | TODO |
-| P1.2 | Frontend scaffold: Next.js 15 App Router, TS strict, Tailwind, shadcn/ui, TanStack Query; app shell + system-status page reading `/api/health`; `tsc --noEmit`, eslint, `next build` all passing. Functional UI only — visual design is Fabel's lane (see D-006) | P0.1 | M | TODO |
-| P1.3 | Containers: backend Dockerfile (uv, non-root, entrypoint runs `alembic upgrade head`), frontend Dockerfile (standalone), `docker-compose.yml` (timescaledb-pg16, redis, backend, frontend; healthchecks, `depends_on: condition: service_healthy`), `.env.example` | P1.1, P1.2 | M | TODO |
-| P1.4 | CI + hooks: GitHub Actions — backend job (ruff, `mypy --strict`, pytest+coverage), frontend job (eslint, `tsc --noEmit`, `next build`), dependency-scan job (pip-audit, npm audit); pre-commit config (.env-guard script, ruff, key-pattern grep) | P1.1, P1.2 | M | TODO |
+| P1.1 | Backend scaffold: root `pyproject.toml` (uv), `backend` package (`core/`, `db/`, `api/`, `tests/`), FastAPI app factory, Pydantic Settings (`core/config.py`), structlog JSON logging + correlation-ID middleware (`core/logging.py`), `/api/health` (DB+Redis component checks), SQLAlchemy 2.0 async engine + session, Alembic baseline migration, ruff (incl. pydocstyle) + `mypy --strict` + pytest all passing | P0.1 | L | DONE |
+| P1.2 | Frontend scaffold: Next.js 15 App Router, TS strict, Tailwind, shadcn/ui, TanStack Query; app shell + system-status page reading `/api/health`; `tsc --noEmit`, eslint, `next build` all passing. Functional UI only — visual design is Fabel's lane (see D-006) | P0.1 | M | DONE |
+| P1.3 | Containers: backend Dockerfile (uv, non-root, entrypoint runs `alembic upgrade head`), frontend Dockerfile (standalone), `docker-compose.yml` (timescaledb-pg16, redis, backend, frontend; healthchecks, `depends_on: condition: service_healthy`), `.env.example` | P1.1, P1.2 | M | WIP (drafted; verified at P1.5) |
+| P1.4 | CI + hooks: GitHub Actions — backend job (ruff, `mypy --strict`, pytest+coverage, I6 skip-guard), frontend job (eslint, `tsc --noEmit`, `next build`), dependency-scan job (pip-audit, audit-ci w/ justified allowlist — D-010); pre-commit config (.env-guard script, ruff, key-pattern grep) | P1.1, P1.2 | M | WIP (drafted; verified at P1.5) |
 | P1.5 | **Gate G1:** clean-clone `docker compose up` verified (health endpoint answers, frontend serves, migrations applied); CI green on the pushed branch | P1.3, P1.4 | S | TODO |
 
 ## Phase 2 — Bitemporal store  [ER]
@@ -92,7 +97,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | P3.7 | Borrow availability + rates connector | P3.1, B1 | M | BLOCKED(B1) |
 | P3.8 | Macro series connector (FRED — keyless tier available) | P3.1 | M | TODO |
 | P3.9 | Data-quality report: per-source coverage, gaps, staleness; persisted per ingestion run | P3.2 | M | TODO |
-| P3.10 | [UI] Data Health page: coverage heatmap, gap list w/ severity, staleness monitor, run history, manual re-sync trigger (rate-limited, CSRF-protected — CC.2) | P3.9 | L | TODO |
+| P3.10 | [UI] Data Health page: coverage heatmap, gap list w/ severity, staleness monitor, run history, manual re-sync trigger (rate-limited, CSRF-protected — CC.2) | P3.9, CC.2 | L | TODO |
 | P3.11 | **Gate G3:** fixed-historical-date snapshot vs independently sourced reference within tolerance; delisted names present; DQ report live | P3.3–P3.9 | M | BLOCKED(B1) |
 
 ## Phase 4 — Universe construction
@@ -146,7 +151,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P8.1 | Purged K-fold with embargo; unit tests on exact fold boundaries incl. overlap/embargo edge cases | G6 | L | TODO |
+| P8.1 | Purged K-fold with embargo; unit tests on exact fold boundaries incl. overlap/embargo edge cases | G5, G6 | L | TODO |
 | P8.2 | LightGBM pipeline: `max_depth ≤ 4`, high `min_child_samples`, L1+L2, `feature_fraction ≈ 0.6`, early stop on purged fold; MLflow tracking; config hash + seed + data version + git commit stored per run (I2) | P8.1 | L | TODO |
 | P8.3 | Time-window ensembling (no stacking); output = cross-sectional rank only | P8.2 | M | TODO |
 | P8.4 | IC + t-stat reporting; **automatic append of every configuration to `TESTING_LEDGER.md`** wired into the training entrypoint so a run cannot complete unlogged | P8.2 | M | TODO |
@@ -159,7 +164,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 |---|---|---|---|---|
 | P9.1 | Ledoit-Wolf shrinkage covariance; PSD + shrinkage-intensity property tests | G8 | M | TODO |
 | P9.2 | [ER] cvxpy optimizer: max ER − risk penalty − **explicit turnover penalty**; sector & beta neutrality, 2% position cap, 20% sector cap, full investment; infeasibility diagnosis + documented relaxation ladder | P9.1 | XL (split at start) | TODO |
-| P9.3 | Cost model: half-spread + commission + sqrt-impact (order size / ADV) + borrow on shorts; **units in bps documented on every function**; conservative defaults flagged `UNCALIBRATED` until P11 fills exist | G8 | L | TODO |
+| P9.3 | Cost model: half-spread + commission + sqrt-impact (order size / ADV) + borrow on shorts; **units in bps documented on every function**; conservative defaults flagged `UNCALIBRATED` until calibrated from paper fills (P11.8 owns clearing the flag) | G8 | L | TODO |
 | P9.4 | Hypothesis suites: optimizer constraint satisfaction on random inputs; cost-model monotonicity/scaling properties | P9.2, P9.3 | L | TODO |
 | P9.5 | [UI] Portfolio page: current vs target, drift, sector/factor exposures, planned trades w/ est. cost, constraint-binding indicators | P9.2 | L | TODO |
 | P9.6 | **Gate G9:** optimizer solves across historical dates; turnover-penalty A/B in backtest shows reduced realized turnover; uncalibrated-cost flag visible | P9.4 | M | TODO |
@@ -188,6 +193,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | P11.5 | Kill switch: drawdown breach, stale data, reconciliation mismatch, manual trigger; halts within one cycle | P11.3 | L | TODO |
 | P11.6 | [UI] Execution page: blotter, fills w/ slippage vs arrival, reconciliation status, cost calibration (predicted vs realized), kill-switch status + manual trigger | P11.3, P11.5 | L | TODO |
 | P11.7 | **Gate G11:** end-to-end paper cycle; injected mismatch caught; kill switch halts within one cycle | P11.5 | M | BLOCKED(B2) |
+| P11.8 | Cost-model calibration from paper fills: fit half-spread/impact parameters against realized slippage, clear the `UNCALIBRATED` flag (closes G9's deferred clause), scheduled recalibration cadence; predicted-vs-realized feeds the 6.9 UI (P11.6). Post-gate task — needs accumulated fill history | P11.7 | L | BLOCKED(B2) |
 
 ## Phase 12 — Monitoring
 
@@ -206,11 +212,13 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 |---|---|---|---|---|
 | CC.0 | Crypto foundation: Fernet key encryption, KEK from env, log-redaction processor for key patterns (structlog processor + tests) | G1 | M | TODO |
 | CC.1 | Immutable audit log + config-as-events: append-only table (who, when, field, old, new), every config write goes through it; versioned-config helper reused by features/extraction/settings | G2 | L | TODO |
-| CC.2 | API hardening as first mutating endpoints land: CSRF protection, rate limiting on mutating routes, parameterized-queries-only lint check | P3.10 | M | TODO |
+| CC.2 | API hardening **before** the first mutating endpoint ships: CSRF protection, rate limiting on mutating routes, parameterized-queries-only lint check. P3.10's re-sync trigger is the first consumer and depends on this | P3.1 | M | TODO |
 | CC.3 | MLflow service in compose + DVC init (data versioning for I2) | G2 | M | TODO |
 | CC.4 | [UI] Settings & Audit page: config viewer, scheduler management, backup status, immutable audit trail browser | CC.1 | L | TODO |
 | CC.5 | Playwright e2e harness + first critical-path test (loads dashboard, health visible); grows with each [UI] task | G1 | M | TODO |
 | CC.6 | Coverage ratchet: enforce ≥85% backend / ≥70% frontend in CI once each stack has meaningful surface (do not fake with trivial tests) | P2.8 | S | TODO |
+| CC.7 | Test-honesty guard (I6) in CI: pytest runs with `--runxfail` and a junit-based check fails the build on any skipped test; extend to the frontend runner when frontend tests exist | G1 | S | DONE (backend side; frontend extension when tests exist) |
+| CC.8 | No-fabrication guard (I3) as code: connector base-class contract test — an unavailable source must raise, never return placeholder data; lint ban on mock/synthetic identifiers in `backend/ingest` production paths | P3.1 | M | TODO |
 
 ---
 

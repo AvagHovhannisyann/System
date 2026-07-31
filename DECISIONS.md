@@ -53,3 +53,9 @@ Append-only. Every non-obvious decision: context, decision, reasoning, rejected 
 
 **Decision.** Backend image entrypoint runs `alembic upgrade head` before `uvicorn`. Single-writer deployment (one backend container) makes start-time migration race-free.
 **Rejected.** Separate migration job/service — right answer for multi-replica production, needless moving part for a single-operator research stack; revisit only if the deployment story changes.
+
+## D-010 — Frontend dependency audit via audit-ci with a committed allowlist (2026-07-31)
+
+**Context.** D-008 makes dependency scanning blocking. On day one, `npm audit --audit-level=high` fails on 12 transitive advisories: postcss (≤8.5.17) and sharp (<0.35.0) are *bundled inside next itself* — the advisory ranges cover every published next release, so no upgrade fixes them — plus a brace-expansion DoS reachable only through the eslint lint-time chain. npm's only offered "fixes" are breaking downgrades (`next@9.3.3`, `eslint-config-next@12`), and raw `npm audit` has no ignore mechanism.
+**Decision.** CI runs `audit-ci --config frontend/audit-ci.jsonc`: fails on any high/critical advisory *not* in the committed allowlist; each allowlisted GHSA carries a written justification and a removal condition in the config itself. Current entries: GHSA-mh99-v99m-4gvg (brace-expansion, dev-time only), GHSA-6g55-p6wh-862q + GHSA-r28c-9q8g-f849 (postcss, build-time on first-party CSS only), GHSA-f88m-g3jw-g9cj (sharp/libvips, no untrusted image processing in this app).
+**Rejected.** (a) `continue-on-error` on the audit job — decoration, violates D-008. (b) npm `overrides` — cannot reach dependencies *bundled* inside next's package. (c) Downgrades npm proposes — strictly worse security posture.
