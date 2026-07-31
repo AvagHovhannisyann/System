@@ -26,6 +26,7 @@ dev = [
     "mypy>=1.11",
     "ruff>=0.6",
     "hypothesis>=6.100",
+    "testcontainers[postgres]>=4.8",
 ]
 
 [build-system]
@@ -60,6 +61,7 @@ select = [
     "PT",    # flake8-pytest-style
     "RET",   # flake8-return
     "SIM",   # flake8-simplify
+    "TID",   # flake8-tidy-imports — D-011 layer 3: banned-api on private db internals
     "ARG",   # flake8-unused-arguments
     "PTH",   # flake8-use-pathlib
     "RUF",   # ruff-specific
@@ -73,7 +75,16 @@ ignore = [
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# D-011 bypass-prevention layer 3 (import contract): the raw engine/sessionmaker
+# internals are private to backend/db. Everything else uses the curated surface
+# of backend.db: as_of, ingest_writer_session, and the named admin helpers.
+"backend.db.engine".msg = "backend.db.engine is private (D-011 layer 3); import as_of / ingest_writer_session / admin helpers from backend.db instead"
+
 [tool.ruff.lint.per-file-ignores]
+"backend/db/**" = [
+    "TID251", # the db layer itself is the one sanctioned user of its private internals
+]
 "backend/tests/**" = [
     "S101", # asserts are the point of tests
     "D1",   # test functions are not public API; docstring enforcement targets shipped code
