@@ -22,7 +22,7 @@
 | G4 | 4 | Past universe contains later-delisted names; size/turnover history inspected for discontinuities |
 | G5 | 5 | Known factor premia reproduce (sign + plausible magnitude); correlation matrix reviewed; no lookahead in any feature |
 | G6 | 6 | Label distribution sane across regimes; uniqueness weights sum correctly; overlap down-weighting proven with ESS report |
-| G7 | 7 | Golden-set agreement ≥85%; contamination divergence below threshold; 1,000-doc re-run within budget; cache hit >90% |
+| G7 | 7 | Golden-set agreement **above the measured intra-rater noise floor** (threshold derived, not the literal 85% — D-014); contamination divergence below threshold; 1,000-doc re-run within budget; cache hit >90% |
 | G8 | 8 | Purged K-fold + embargo unit-tested; IC with t-stat reported; every config in `TESTING_LEDGER.md` |
 | G9 | 9 | Optimizer solves across historical dates; turnover penalty demonstrably reduces turnover; cost defaults flagged conservative |
 | G10 | 10 | Framework recovers injected signal on synthetic data AND reports near-zero alpha on pure noise |
@@ -81,7 +81,7 @@ Design first, then enforce. This is the layer every backtest's honesty rests on.
 | P2.6 | Hypothesis property suite: random facts (random valid intervals, knowledge times) + random as-of queries; 10,000 cases; assert no returned row has `knowledge_time > as_of`; runs against real Postgres via Testcontainers | P2.3 | L | DONE (81,121 cases, 0 failures) |
 | P2.7 | Bypass-impossibility test: prove application code cannot read fact tables without the query layer (import-time + runtime enforcement both exercised) | P2.4 | M | DONE |
 | P2.8 | **Gate G2:** P2.6 zero failures + P2.7 passing, in CI | P2.6, P2.7 | S | GATE-PASSED (2026-07-31, see PROGRESS) |
-| P2.9 | EXPLAIN verification that outer quals push down into the versioned subquery past `DISTINCT ON` (P2.5's stated check, not yet done — performance, not correctness; audit flagged joins constraining event time via another table as the likely non-pushdown case) | P2.8 | S | TODO |
+| P2.9 | EXPLAIN verification that outer quals push down into the versioned subquery past `DISTINCT ON` into **chunk exclusion**. **Scheduled: the moment the first hypertable holds meaningful volume — not before (empty-table plans prove nothing), not after Phase 4** (D-016). Performance gate with design consequences: no pushdown ⇒ every as-of query full-scans; at Phase 6 volumes that is minutes vs days, and if the fix changes how predicates are injected it must land before P4–P6 write against the current shape | P3.4 data loaded | S | SCHEDULED (D-016) |
 | P2.10 | Retraction-row payload hygiene: retractions must fabricate NOT NULL payload columns; mark/enforce placeholder payloads so they cannot be mistaken for data (audit finding, I3-adjacent) | P2.8 | S | TODO |
 
 ## Phase 3 — Data ingestion
@@ -91,12 +91,12 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
 | P3.1 | Connector framework: base class (retry, rate-limit, incremental checkpoint, DQ metrics emission), Celery + beat wiring, ingestion-run tracking table marking each run `backfill\|live` with a DQ check flagging live runs whose knowledge_times trail ingestion beyond the source's declared lag (D-011 compensating control), rejection/flagging of future `knowledge_time` at write, and the **open-interval supersession contract**: a connector closing an open-ended fact writes a later-knowledge correction row with the same `valid_from` and a bounded `valid_to` (audit finding — until written, consecutive open intervals overlap) | G2 | L | TODO |
-| P3.2 | SEC EDGAR connector: filings index + documents, **acceptance timestamps** as `knowledge_time`, incremental sync | P3.1 | L | TODO |
+| P3.2 | SEC EDGAR connector — **the reference implementation of the P3.1 contracts** (operator direction): filings index + documents, **acceptance timestamps from the daily index files** as `knowledge_time`, incremental sync. Chosen first because it needs no key (B1-independent), because acceptance timestamps are the hardest temporal-correctness problem in Phase 3 — exercising the bitemporal layer against a real adversarial case rather than a synthetic one — and because it is the Phase 7 input anyway. Sharadar drops in behind the same interface once B1 clears | P3.1 | L | TODO |
 | P3.3 | Corporate actions connector (splits, dividends, delistings, ticker changes, M&A) — **must include delisted securities** | P3.1, B1 | L | BLOCKED(B1) |
 | P3.4 | Daily OHLCV connector with full adjustment history (raw + adjustment factors stored separately) | P3.1, B1 | L | BLOCKED(B1) |
 | P3.5 | Point-in-time fundamentals connector: unrestated, original report dates → `knowledge_time` | P3.1, B1 | L | BLOCKED(B1) |
 | P3.6 | Earnings call transcripts connector | P3.1, B1 | M | BLOCKED(B1) |
-| P3.7 | Borrow availability + rates connector | P3.1, B1 | M | BLOCKED(B1) |
+| P3.7 | Borrow availability + rates — **from IBKR in Phase 11, not a data vendor** (operator decision, B1). Rescoped: no vendor connector; the interface is defined here and fed by the Phase 11 adapter | P3.1, B2 | M | BLOCKED(B2) |
 | P3.8 | Macro series connector (FRED — keyless tier available) | P3.1 | M | TODO |
 | P3.9 | Data-quality report: per-source coverage, gaps, staleness; persisted per ingestion run | P3.2 | M | TODO |
 | P3.10 | [UI] Data Health page: coverage heatmap, gap list w/ severity, staleness monitor, run history, manual re-sync trigger (rate-limited, CSRF-protected — CC.2) | P3.9, CC.2 | L | TODO |
@@ -140,10 +140,10 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | P7.2 | Anonymization pipeline: mask company names/tickers/executive names, strip all dates; adversarial test set proving masking on EDGAR text | P3.2 | L | TODO |
 | P7.3 | Extraction task framework: chunking, schema-validated outputs (Pydantic), temperature 0, raw responses stored, prompt version hash on every extraction | P7.2 | L | TODO |
 | P7.4 | Delta-oriented extraction tasks: risk-factor language change, guidance tone vs magnitude, Q&A evasiveness, accounting-language shift, added/removed risk factors | P7.3 | XL (split per-task at start) | TODO |
-| P7.5 | Ensemble: 2–3 cost-tier models, parallel calls, median aggregation, disagreement score, review flag above threshold | P7.3, B4 | L | BLOCKED(B4) |
+| P7.5 | Ensemble: 2–3 cost-tier models, parallel calls, median aggregation, disagreement score, review flag above threshold. **Backfill is pilot-gated: 200 names / 5 years / 2-model ensemble until Phase 8 proves incremental IC over the P5 baseline (D-015)** — the pilot is a ledger row | P7.3, B4 | L | BLOCKED(B4) |
 | P7.6 | Cache keyed `hash(document + prompt_version + model)`; prompt change auto-invalidates affected documents | P7.3 | M | TODO |
 | P7.7 | Cost governor: per-provider daily+monthly caps enforced **before** each call; halt vs degrade-to-cheaper-model behavior; spend tracking | P7.5 | L | TODO |
-| P7.8 | Golden set harness: storage, scoring, per-prompt-version score history. **Labels themselves need human labelling — B3** | P7.4 | L | BLOCKED(B3 for labels; harness TODO) |
+| P7.8 | Golden set harness: storage, scoring, per-prompt-version score history, **blind re-label mode** (same document served without prior label, for the intra-rater measurement) and **single-construct-across-all-documents** ordering — never all constructs per document (D-014, B3 protocol). Labels are human — B3 | P7.4 | L | BLOCKED(B3 for labels; harness TODO) |
 | P7.9 | Contamination probe: anonymized-vs-named scoring divergence, threshold, wired into CI as deploy gate | P7.5 | L | TODO |
 | P7.10 | Prompt management: content-addressed versions, history, diff data, golden-score attachment, rollback | P7.3 | L | TODO |
 | P7.11 | [UI] Agents & Extraction page (operator's home — split): registry & key mgmt; per-task model assignment (versioned); prompt history/diff/rollback; ensemble config; cost gauges; quality trends; document inspector (anonymized text sent, raw responses, aggregate, disagreement) | P7.1–P7.10 | XL (split at start) | TODO |
@@ -195,7 +195,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | P11.5 | Kill switch: drawdown breach, stale data, reconciliation mismatch, manual trigger; halts within one cycle | P11.3 | L | TODO |
 | P11.6 | [UI] Execution page: blotter, fills w/ slippage vs arrival, reconciliation status, cost calibration (predicted vs realized), kill-switch status + manual trigger | P11.3, P11.5 | L | TODO |
 | P11.7 | **Gate G11:** end-to-end paper cycle; injected mismatch caught; kill switch halts within one cycle | P11.5 | M | BLOCKED(B2) |
-| P11.8 | Cost-model calibration from paper fills: fit half-spread/impact parameters against realized slippage, clear the `UNCALIBRATED` flag (closes G9's deferred clause), scheduled recalibration cadence; predicted-vs-realized feeds the 6.9 UI (P11.6). Post-gate task — needs accumulated fill history | P11.7 | L | BLOCKED(B2) |
+| P11.8 | Cost-model calibration from paper fills: fit half-spread/impact parameters against realized slippage, clear the `UNCALIBRATED` flag (closes G9's deferred clause), scheduled recalibration cadence; predicted-vs-realized feeds the 6.9 UI (P11.6). **IBKR paper fills are optimistic (fill at the touch, no queue position) — they are a LOWER BOUND on slippage, never an estimate; a documented haircut is mandatory (D-013)**. Post-gate task — needs accumulated fill history | P11.7 | L | BLOCKED(B2) |
 
 ## Phase 12 — Monitoring
 
@@ -220,6 +220,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | CC.5 | Playwright e2e harness + first critical-path test (loads dashboard, health visible); grows with each [UI] task | G1 | M | TODO |
 | CC.6 | Coverage ratchet: enforce ≥85% backend / ≥70% frontend in CI once each stack has meaningful surface (do not fake with trivial tests) | P2.8 | S | TODO |
 | CC.7 | Test-honesty guard (I6) in CI: pytest runs with `--runxfail` and a junit-based check fails the build on any skipped test; extend to the frontend runner when frontend tests exist | G1 | S | DONE (backend side; frontend extension when tests exist) |
+| CC.9 | **Database role separation** — migration-owner role owns schema and triggers; app role holds INSERT/SELECT only, so append-only cannot be disabled by the credential the app runs under. **Deadline: before Phase 11, and before the §6.11 audit log or `TESTING_LEDGER.md` integrity is presented as trustworthy** — 'immutable' is a false claim while the owning role can drop its own triggers, and DSR is only as honest as a ledger nobody can silently edit (D-017) | G10 | M | TODO |
 | CC.8 | No-fabrication guard (I3) as code: connector base-class contract test — an unavailable source must raise, never return placeholder data; lint ban on mock/synthetic identifiers in `backend/ingest` production paths | P3.1 | M | TODO |
 
 ---

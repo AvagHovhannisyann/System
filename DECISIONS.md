@@ -200,3 +200,101 @@ silent hours-scale I1 violation invisible to every test. Writer-supplied tempora
 values must be timezone-aware or raise before I/O, and PG `'infinity'` round-trips
 through an aware sentinel instead of leaking the naive `datetime.max` asyncpg
 returns (which raises `TypeError` on any aware comparison).
+
+## D-013 — Paper fills are a lower bound on slippage, never an estimate (2026-07-31)
+
+**Context.** Directive §5-P9 says the cost model is "calibrated against paper fills once
+Phase 11 exists". Operator correction: IBKR paper fills are **optimistic** — they fill at
+the touch far more readily than reality and model **no queue position**.
+
+**Decision.** P11.8 does not calibrate the cost model directly to paper fills. Realized
+paper slippage is treated as a **lower bound**; the fitted parameters carry a documented
+haircut, and any backtest using them displays the calibration basis. The haircut's
+magnitude and derivation are recorded here when P11.8 lands.
+
+**Reasoning.** Calibrating directly to optimistic fills understates costs, and
+understated costs are the single easiest way to turn a losing strategy into a winning
+backtest — the exact failure mode I4 and the whole validation framework exist to
+prevent. A cost model that is wrong in the *conservative* direction loses money on
+paper; one wrong in the optimistic direction loses it for real.
+
+**Rejected.** (a) Calibrate to paper fills and note the caveat in prose — the number
+would still flow into every reported Sharpe. (b) Wait for live fills — out of scope
+forever (§1.1), so the lower-bound treatment is permanent, not transitional.
+
+## D-014 — Golden-set threshold is set relative to the human noise floor (2026-07-31)
+
+**Context.** Directive §5-P7 sets the Gate G7 bar at "golden-set agreement ≥ 85%".
+Operator correction: that number is unjustifiable until the labeller's own **intra-rater
+agreement** is measured.
+
+**Decision.** Measure the noise floor first (B3 protocol: 60-document pilot → rubric
+fix → 20 blind re-labels a week later → intra-rater agreement). The model gate is then
+set **relative to that floor**. If self-agreement is 82%, an 85% model gate is measuring
+noise, not capability, and the reported figure would be meaningless precision.
+
+**Reasoning.** An agreement threshold above the measurement instrument's own
+reproducibility cannot be satisfied by any model, and a threshold near it is measuring
+label noise. Reporting "87% agreement" against an unmeasured floor is the kind of
+false precision this project exists to avoid. The floor also bounds what any downstream
+extraction-quality drift signal (P12.3) can legitimately claim to detect.
+
+**Consequence.** Gate G7's numeric bar is *derived*, not literal, and the derivation is
+recorded in `TESTING_LEDGER.md` alongside the floor measurement. The directive's 85% is
+treated as the operator's prior, superseded by measurement.
+
+## D-015 — LLM backfill is gated on proven incremental IC (2026-07-31)
+
+**Context.** Steady-state extraction is ~60k calls/year (negligible). The historical
+backfill is ~600k calls, order **$1,000–1,500**, and is the only material LLM cost.
+
+**Decision.** No full backfill before **Phase 8 demonstrates incremental IC** over the
+Phase 5 baseline factors. The gating experiment is a pilot at **200 names, 5 years,
+2-model ensemble**; its result is a `TESTING_LEDGER.md` row like any other trial.
+Cost levers, in order of preference: universe size, history depth, ensemble width.
+
+**Reasoning.** A negative pilot and a negative full backfill teach exactly the same
+thing at a fraction of the cost. Spending first would also create sunk-cost pressure to
+find the LLM features useful — precisely the bias the validation framework is built to
+resist.
+
+**Ledger note.** The pilot is a trial and counts toward the Deflated Sharpe trial count
+(§9.7). Running it and *not* logging it because it was "just a pilot" is exactly the
+omission that makes DSR dishonest.
+
+## D-016 — P2.9 (pushdown verification) runs at first real data volume (2026-07-31)
+
+**Context.** P2.5 promised an EXPLAIN sanity check; it was not done. The versioned
+subquery carries no entity/event-time quals, so index use and hypertable chunk pruning
+depend on Postgres pushing outer quals down through two subquery layers past
+`DISTINCT ON` — safe only for quals on the distinct-on columns.
+
+**Decision.** Run P2.9 **the moment the first hypertable holds meaningful volume** —
+not now (an empty table's plan proves nothing), and **not after Phase 4**.
+
+**Reasoning.** This is a performance gate with **design consequences**, not a loose end.
+If predicates do not reach chunk exclusion, every as-of query full-scans the hypertable;
+at Phase 6 volumes — daily bars × universe × a decade, with triple-barrier labels
+resolved per name per date — that is the difference between a backtest in minutes and
+one in days. Critically, **if the fix requires changing how predicates are injected, that
+must be known before Phases 4–6 write against the current shape** — otherwise the
+rewrite lands after there is code depending on it. Empty-table EXPLAIN output cannot
+detect any of this, which is why it waits for volume rather than running now.
+
+## D-017 — Deadline for role separation: before the audit log is trusted (2026-07-31)
+
+**Context.** D-012 records that append-only is enforced by triggers under a single owning
+role, which can `DISABLE`/`DROP` its own triggers, and backlogged true role separation.
+A backlog item with no deadline is a deferral without end.
+
+**Decision.** Role separation ships **before Phase 11**, and specifically **before the
+§6.11 immutable audit log is presented as trustworthy**.
+
+**Reasoning.** "Immutable audit log" is a **false claim** while the owning role can drop
+the triggers enforcing immutability — and the dashboard states it as fact to the
+operator. The same applies to `TESTING_LEDGER.md` integrity, which is what makes the
+Deflated Sharpe honest: a ledger that can be silently edited makes the trial count
+unverifiable, and DSR is only as honest as its trial count (§9.7). The deadline is
+Phase 11 — not "before real capital", because there is no real capital in this system by
+design (§1.1); the binding constraint is the point at which the platform starts making
+integrity claims to its operator.
