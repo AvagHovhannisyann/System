@@ -24,8 +24,19 @@ jobs:
         run: uv run ruff check .
       - name: Typecheck (strict)
         run: uv run mypy backend
-      - name: Tests
-        run: uv run pytest --cov=backend --cov-report=term
+      - name: Tests (xfails forced to run)
+        run: uv run pytest --runxfail --cov=backend --cov-report=term --junitxml=/tmp/junit.xml
+      - name: Test-honesty guard (I6 — a skipped test counts as a failure)
+        run: |
+          uv run python -c "
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse('/tmp/junit.xml').getroot()
+          skipped = sum(int(s.get('skipped', 0)) for s in root.iter('testsuite'))
+          if skipped:
+              sys.exit(f'I6 violation: {skipped} skipped test(s) — DIRECTIVE.md section 2 I6')
+          print('I6 guard: zero skipped tests')
+          "
 
   frontend:
     runs-on: ubuntu-latest
@@ -69,6 +80,6 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - name: npm audit (high+)
+      - name: npm dependency audit (high+, committed allowlist with justifications)
         working-directory: frontend
-        run: npm audit --audit-level=high
+        run: npx --yes audit-ci --config audit-ci.jsonc

@@ -1,0 +1,28 @@
+{
+  // Security-audit policy for the frontend (consumed by `npx audit-ci` in CI).
+  // Fails the build on any high/critical advisory NOT explicitly allowlisted here.
+  // Per DECISIONS.md D-008/D-010: every allowlisted advisory needs a justification
+  // and a removal condition. Do not allowlist anything without both.
+  "high": true,
+  "allowlist": [
+    // brace-expansion DoS (unbounded expansion → OOM). Reached only through the
+    // eslint/minimatch toolchain at lint time on developer/CI machines; never in
+    // the shipped app. The advisory range covers every release reachable from
+    // eslint 9 — the only offered "fix" is an eslint major pre-release.
+    // Remove when eslint-config-next ships against a patched chain.
+    "GHSA-mh99-v99m-4gvg",
+    // postcss advisories (sourceMappingURL file read; source-map path traversal).
+    // postcss is BUNDLED inside next itself — the advisory range covers every
+    // published next release, so no upgrade fixes it. Exposure requires processing
+    // attacker-controlled CSS/source maps at build time; this build compiles only
+    // first-party CSS. Remove when next bundles postcss >= 8.5.18 (check
+    // `npm ls postcss` after next upgrades).
+    "GHSA-6g55-p6wh-862q",
+    "GHSA-r28c-9q8g-f849",
+    // sharp < 0.35.0 inherits libvips CVEs (2026-33327/33328/35590/35591); sharp
+    // is bundled by next for image optimization. This dashboard never processes
+    // untrusted images (no user uploads; first-party assets only). Remove when
+    // next bundles sharp >= 0.35.0.
+    "GHSA-f88m-g3jw-g9cj"
+  ]
+}
