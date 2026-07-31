@@ -1,0 +1,27 @@
+# Install once per clone: uv run pre-commit install
+# All hooks are local so tool versions come from uv.lock — one source of truth.
+repos:
+  - repo: local
+    hooks:
+      - id: forbid-env-files
+        name: forbid committing .env files
+        entry: scripts/check_no_env.sh
+        language: script
+        always_run: true
+        pass_filenames: false
+      - id: forbid-secrets
+        name: block credential patterns in staged content
+        entry: scripts/check_secrets.sh
+        language: script
+        always_run: true
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format (check)
+        entry: uv run ruff format --check --force-exclude
+        language: system
+        types_or: [python, pyi]
+      - id: ruff-check
+        name: ruff lint
+        entry: uv run ruff check --force-exclude
+        language: system
+        types_or: [python, pyi]
