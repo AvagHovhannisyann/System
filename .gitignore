@@ -1,0 +1,37 @@
+# secrets — never committed (directive §7, I5)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+
+# node / next
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/next-env.d.ts
+*.tsbuildinfo
+
+# data & artifacts — never committed (directive §0.4)
+data/
+mlruns/
+mlartifacts/
+*.parquet
+*.csv
+*.duckdb
+
+# misc
+.DS_Store
+*.log
