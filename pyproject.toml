@@ -16,6 +16,9 @@ dependencies = [
     "redis>=5",
     "greenlet>=3",
     "celery[redis]>=5.4",
+    "httpx>=0.27",        # runtime: connector HTTP client (P3.2 EDGAR onward)
+    "cryptography>=43",   # runtime: Fernet key encryption at rest (CC.0, §7)
+    "itsdangerous>=2.2",  # runtime: signed CSRF tokens (CC.2)
 ]
 
 [dependency-groups]
