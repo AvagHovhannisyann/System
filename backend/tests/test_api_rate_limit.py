@@ -28,6 +28,7 @@ The container is started with host networking when the docker daemon offers no
 from __future__ import annotations
 
 import asyncio
+import socket
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -404,26 +405,51 @@ def _bridge_network_available() -> bool:
         client.client.close()
 
 
+def _free_tcp_port() -> int:
+    """Return a TCP port that is free right now on the loopback interface.
+
+    Only meaningful for the host-network path below. Binding to port 0 lets the
+    kernel choose, and the socket is closed before the port is handed over —
+    a small race window, but the alternative (a fixed port) fails outright
+    whenever anything else already holds it.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
 @pytest.fixture(scope="session")
 def redis_url() -> Iterator[str]:
-    """Start a real Redis and yield its connection URL for the whole session."""
+    """Start a real Redis and yield its connection URL for the whole session.
+
+    On a daemon with bridge networking (CI) the container publishes a mapped
+    port normally. On a sandboxed daemon offering only ``host``/``none`` the
+    container shares the host's network stack — and then Redis's default 6379
+    may already be taken by something else on the host, which makes the
+    container exit immediately with "Address in use". So the host-network path
+    picks a free port and tells Redis to listen on it, rather than assuming
+    6379 is available.
+    """
     container = DockerContainer(_REDIS_IMAGE)
     container.waiting_for(LogMessageWaitStrategy("Ready to accept connections"))
     host_network = not _bridge_network_available()
+    port = _REDIS_PORT
     if host_network:
         testcontainers_config.ryuk_disabled = True
+        port = _free_tcp_port()
         container.with_kwargs(network_mode="host")
+        container.with_command(f"redis-server --port {port}")
         container.ports = {}
     else:
         container.with_exposed_ports(_REDIS_PORT)
 
     with container as running:
         if host_network:
-            yield f"redis://127.0.0.1:{_REDIS_PORT}/0"
+            yield f"redis://127.0.0.1:{port}/0"
         else:
             host = running.get_container_host_ip()
-            port = running.get_exposed_port(_REDIS_PORT)
-            yield f"redis://{host}:{port}/0"
+            mapped = running.get_exposed_port(_REDIS_PORT)
+            yield f"redis://{host}:{mapped}/0"
 
 
 @pytest.fixture

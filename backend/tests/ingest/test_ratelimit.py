@@ -111,3 +111,66 @@ async def test_acquiring_more_than_capacity_is_rejected_rather_than_hanging() ->
     bucket = _bucket(clock, requests_per_second=1.0, burst=2)
     with pytest.raises(ValueError, match="could never be satisfied"):
         await bucket.acquire(3.0)
+
+
+class _CountingClock:
+    """Injected clock that advances only when slept on, and refuses to spin.
+
+    ``TokenBucket`` is given a monotonic source and a sleep function. This
+    clock advances virtual time by exactly the requested delay, and raises once
+    the number of sleeps passes a bound — so a wait loop that fails to make
+    progress fails the test in milliseconds instead of hanging the suite (the
+    original defect consumed several GB before being killed).
+    """
+
+    def __init__(self, max_sleeps: int = 64) -> None:
+        """Start at t=0 with no sleeps recorded."""
+        self.now = 0.0
+        self.sleeps = 0
+        self.max_sleeps = max_sleeps
+
+    def monotonic(self) -> float:
+        """Return the current virtual time in seconds."""
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        """Advance virtual time, bounding the total number of waits."""
+        self.sleeps += 1
+        if self.sleeps > self.max_sleeps:
+            msg = (
+                f"acquire() slept {self.sleeps} times without completing: the wait "
+                f"loop is not making progress (virtual time {self.now:.9f}s)"
+            )
+            raise AssertionError(msg)
+        self.now += seconds
+
+
+@pytest.mark.parametrize("rate", [10.0, 3.0, 7.0, 1.0 / 3.0, 0.7, 1.1])
+async def test_acquire_terminates_for_rates_without_exact_reciprocals(rate: float) -> None:
+    """Refill rounding must not stall the wait loop (regression).
+
+    Rates whose reciprocal is not exactly representable in binary floating
+    point (1/3, 0.7, 1.1, and 10.0 among them) can leave the balance one ulp
+    below the requested token after sleeping precisely long enough. The loop
+    then computed a ~0 delay and spun forever under an injected clock. Each
+    acquisition here must finish in a small number of sleeps.
+    """
+    clock = _CountingClock()
+    bucket = TokenBucket(
+        requests_per_second=rate, burst=1, monotonic=clock.monotonic, sleep=clock.sleep
+    )
+    for _ in range(20):
+        await bucket.acquire()
+    assert clock.sleeps <= 20 + 1
+
+
+async def test_acquire_waits_about_the_expected_time_at_a_steady_rate() -> None:
+    """The tolerance must not turn into free capacity: pacing still holds."""
+    clock = _CountingClock(max_sleeps=256)
+    bucket = TokenBucket(
+        requests_per_second=10.0, burst=1, monotonic=clock.monotonic, sleep=clock.sleep
+    )
+    for _ in range(11):
+        await bucket.acquire()
+    # 1 immediate (full bucket) + 10 paced at 0.1s each, within a nanosecond.
+    assert clock.now == pytest.approx(1.0, abs=1e-6)

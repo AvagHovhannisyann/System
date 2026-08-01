@@ -34,6 +34,23 @@ if TYPE_CHECKING:
 
 __all__ = ["RateLimit", "TokenBucket"]
 
+_TOKEN_EPSILON = 1e-9
+"""Tolerance (in tokens) when testing whether the bucket can satisfy a request.
+
+Floating-point refill can leave the balance an ulp short of the requested
+amount after sleeping exactly long enough. Treating that as satisfied grants a
+token at most a nanosecond of rate early; treating it as unsatisfied makes
+:meth:`TokenBucket.acquire` spin. See the comparison in ``acquire``.
+"""
+
+_MIN_SLEEP_S = 1e-6
+"""Smallest wait ``acquire`` will perform when it must wait at all (seconds).
+
+A liveness floor, not a rate parameter: it guarantees every loop iteration
+advances the clock by a positive amount, so the wait loop terminates even under
+an injected clock that only moves when asked to sleep.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class RateLimit:
@@ -160,10 +177,22 @@ class TokenBucket:
         async with self._lock:
             while True:
                 self._refill()
-                if self._tokens >= tokens:
-                    self._tokens -= tokens
+                # Compare with a tolerance rather than exactly. Refill credits
+                # `elapsed * rate` in floating point, so after sleeping exactly
+                # long enough the balance can land one ulp *below* `tokens` —
+                # e.g. 0.9999999999999999 against 1.0. Without the tolerance the
+                # branch is missed, the next delay computes as ~0, and the loop
+                # spins: against a real clock a hot spin that only ends because
+                # wall time drifts forward, and against an injected clock an
+                # unbounded loop. Granting up to _TOKEN_EPSILON of a token early
+                # is a nanosecond-scale concession; spinning is not.
+                if self._tokens >= tokens - _TOKEN_EPSILON:
+                    self._tokens = max(0.0, self._tokens - tokens)
                     return waited
-                delay = (tokens - self._tokens) / self._rate
+                # Floor the wait so every iteration advances the clock by a
+                # positive amount. This is the liveness guarantee: it holds even
+                # if some future rounding path slips past the tolerance above.
+                delay = max((tokens - self._tokens) / self._rate, _MIN_SLEEP_S)
                 await self._sleep(delay)
                 waited += delay
 
