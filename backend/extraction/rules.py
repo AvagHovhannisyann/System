@@ -227,13 +227,42 @@ def _candidates(text: str, rules: Sequence[MaskRule]) -> list[tuple[int, int, Ma
     return found
 
 
-def _select(candidates: Iterable[tuple[int, int, MaskRule]]) -> list[tuple[int, int, MaskRule]]:
-    """Resolve overlaps: leftmost, then longest, then lowest rule priority."""
+def _placeholder_spans(text: str) -> list[tuple[int, int]]:
+    """Return the spans of every already-emitted placeholder in ``text``.
+
+    Masking must be **idempotent**: running it twice, or running it over text
+    that already carries placeholders from an earlier stage, must leave those
+    placeholders exactly as they are. Without this, an entity whose name
+    contains a word the placeholder itself uses re-matches inside the
+    placeholder — an entity named ``Company Company`` masks to
+    ``[COMPANY_1]``, whose interior then matches again and becomes
+    ``[[COMPANY_1]_1]``. That corrupts the token the model is meant to read,
+    and it corrupts the reverse mapping, so the leak detector can no longer
+    tie a placeholder back to its entity.
+    """
+    return [match.span() for match in PLACEHOLDER_SHAPE.finditer(text)]
+
+
+def _select(
+    candidates: Iterable[tuple[int, int, MaskRule]],
+    protected: Sequence[tuple[int, int]] = (),
+) -> list[tuple[int, int, MaskRule]]:
+    """Resolve overlaps: leftmost, then longest, then lowest rule priority.
+
+    Candidates intersecting a ``protected`` span (an existing placeholder) are
+    dropped, so placeholders are opaque to further masking.
+    """
     ordered = sorted(candidates, key=lambda c: (c[0], -(c[1] - c[0]), c[2].priority, c[2].name))
     kept: list[tuple[int, int, MaskRule]] = []
     cursor = 0
     for start, end, rule in ordered:
         if start < cursor:
+            continue
+        # Any overlap at all disqualifies the candidate — a match that merely
+        # clips a placeholder's edge would still split the token.
+        if any(
+            start < guarded_end and guarded_start < end for guarded_start, guarded_end in protected
+        ):
             continue
         kept.append((start, end, rule))
         cursor = end
@@ -255,7 +284,7 @@ def apply_rules(text: str, rules: Sequence[MaskRule]) -> RuleApplication:
         A :class:`RuleApplication` holding the rewritten text, every
         replacement in document order, and one entry per distinct placeholder.
     """
-    selected = _select(_candidates(text, rules))
+    selected = _select(_candidates(text, rules), _placeholder_spans(text))
 
     buckets: dict[str, _Bucket] = {}
     counters: dict[MaskKind, int] = {}
