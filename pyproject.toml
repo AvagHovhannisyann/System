@@ -15,6 +15,7 @@ dependencies = [
     "structlog>=24.1",
     "redis>=5",
     "greenlet>=3",
+    "celery[redis]>=5.4",
 ]
 
 [dependency-groups]
@@ -27,6 +28,7 @@ dev = [
     "ruff>=0.6",
     "hypothesis>=6.100",
     "testcontainers[postgres]>=4.8",
+    "celery-types>=0.22",
 ]
 
 [build-system]

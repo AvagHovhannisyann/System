@@ -22,6 +22,8 @@ jobs:
         run: uv run ruff format --check .
       - name: Lint
         run: uv run ruff check .
+      - name: No-fabrication guard (CC.8 — I3: no mock/synthetic identifiers in backend/ingest)
+        run: uv run python scripts/check_no_fabrication.py
       - name: Typecheck (strict)
         run: uv run mypy backend
       - name: Tests (xfails forced to run)

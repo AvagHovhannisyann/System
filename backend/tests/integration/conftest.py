@@ -117,7 +117,10 @@ async def _clean_database(
     try:
         async with reset_engine.begin() as connection:
             await connection.execute(
-                text("TRUNCATE TABLE price_bar, security_master, security RESTART IDENTITY CASCADE")
+                text(
+                    "TRUNCATE TABLE price_bar, security_master, security, ingestion_run "
+                    "RESTART IDENTITY CASCADE"
+                )
             )
     finally:
         await reset_engine.dispose()
