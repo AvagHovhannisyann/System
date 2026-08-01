@@ -61,6 +61,33 @@ jobs:
       - name: Build
         run: npm run build
 
+  e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      # Browser build must match the pinned @playwright/test version; bumping
+      # one without the other breaks the launch (see playwright.config.ts).
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+      # playwright.config.ts owns the dev-server lifecycle via webServer.
+      - name: Playwright e2e
+        run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7
+
   security:
     runs-on: ubuntu-latest
     steps:
