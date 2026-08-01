@@ -167,9 +167,9 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P9.1 | Ledoit-Wolf shrinkage covariance; PSD + shrinkage-intensity property tests | G8 | M | TODO |
+| P9.1 | Ledoit-Wolf shrinkage covariance; PSD + shrinkage-intensity property tests | G8 | M | DONE |
 | P9.2 | [ER] cvxpy optimizer: max ER − risk penalty − **explicit turnover penalty**; sector & beta neutrality, 2% position cap, 20% sector cap, full investment; infeasibility diagnosis + documented relaxation ladder | P9.1 | XL (split at start) | TODO |
-| P9.3 | Cost model: half-spread + commission + sqrt-impact (order size / ADV) + borrow on shorts; **units in bps documented on every function**; conservative defaults flagged `UNCALIBRATED` until calibrated from paper fills (P11.8 owns clearing the flag) | G8 | L | TODO |
+| P9.3 | Cost model: half-spread + commission + sqrt-impact (order size / ADV) + borrow on shorts; **units in bps documented on every function**; conservative defaults flagged `UNCALIBRATED` until calibrated from paper fills (P11.8 owns clearing the flag) | G8 | L | DONE |
 | P9.4 | Hypothesis suites: optimizer constraint satisfaction on random inputs; cost-model monotonicity/scaling properties | P9.2, P9.3 | L | TODO |
 | P9.5 | [UI] Portfolio page: current vs target, drift, sector/factor exposures, planned trades w/ est. cost, constraint-binding indicators | P9.2 | L | TODO |
 | P9.6 | **Gate G9:** optimizer solves across historical dates; turnover-penalty A/B in backtest shows reduced realized turnover; uncalibrated-cost flag visible | P9.4 | M | TODO |
@@ -179,9 +179,9 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
 | P10.1 | [ER] Backtest engine: event-driven daily loop, all reads through `as_of()`, net-of-cost only (I4), artifact stamped with git commit + data version + config hash + seed (I2) | G9 | XL (split at start) | TODO |
-| P10.2 | [ER] CPCV: combinatorial purged splits → **distribution** of OOS Sharpe ratios | P10.1 | L | TODO |
-| P10.3 | [ER] Deflated Sharpe Ratio using full trial count parsed from `TESTING_LEDGER.md` | P10.2 | L | TODO |
-| P10.4 | [ER] Probability of Backtest Overfitting | P10.2 | L | TODO |
+| P10.2 | [ER] CPCV: combinatorial purged splits → **distribution** of OOS Sharpe ratios | P10.1 | L | DONE |
+| P10.3 | [ER] Deflated Sharpe Ratio using full trial count parsed from `TESTING_LEDGER.md` | P10.2 | L | DONE |
+| P10.4 | [ER] Probability of Backtest Overfitting | P10.2 | L | DONE |
 | P10.5 | Walk-forward analysis + buy-and-hold benchmark comparison shown with every result; CIs on every metric; UI contract: no point estimate without interval | P10.1 | L | TODO |
 | P10.6 | [ER] **Synthetic-truth harness:** injected signal of known strength recovered; pure noise reports near-zero alpha. The noise test is the critical one | P10.2–P10.5 | L | TODO |
 | P10.7 | [UI] Backtests explorer: equity curve vs benchmark, **CPCV Sharpe histogram with point estimate marked** (the most important visualization in the app), DSR, PBO, drawdowns, turnover, cost waterfall, per-year attribution, run comparison, ledger trial count on every view | P10.5 | XL (split at start) | TODO |
@@ -216,7 +216,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | ID | Task | After | Cx | Status |
 |---|---|---|---|---|
 | CC.0 | Crypto foundation: Fernet key encryption, KEK from env, log-redaction processor for key patterns (structlog processor + tests) | G1 | M | DONE |
-| CC.1 | Immutable audit log + config-as-events: append-only table (who, when, field, old, new), every config write goes through it; versioned-config helper reused by features/extraction/settings | G2 | L | TODO |
+| CC.1 | Immutable audit log + config-as-events: append-only table (who, when, field, old, new), every config write goes through it; versioned-config helper reused by features/extraction/settings | G2 | L | DONE |
 | CC.2 | API hardening **before** the first mutating endpoint ships: CSRF protection, rate limiting on mutating routes, parameterized-queries-only lint check. P3.10's re-sync trigger is the first consumer and depends on this | P3.1 | M | DONE |
 | CC.3 | MLflow service in compose + DVC init (data versioning for I2) | G2 | M | TODO |
 | CC.4 | [UI] Settings & Audit page: config viewer, scheduler management, backup status, immutable audit trail browser | CC.1 | L | TODO |
