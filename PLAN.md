@@ -156,7 +156,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P8.1 | Purged K-fold with embargo; unit tests on exact fold boundaries incl. overlap/embargo edge cases | G5, G6 | L | TODO |
+| P8.1 | Purged K-fold with embargo; unit tests on exact fold boundaries incl. overlap/embargo edge cases | G5, G6 | L | DONE |
 | P8.2 | LightGBM pipeline: `max_depth ≤ 4`, high `min_child_samples`, L1+L2, `feature_fraction ≈ 0.6`, early stop on purged fold; MLflow tracking; config hash + seed + data version + git commit stored per run (I2) | P8.1 | L | TODO |
 | P8.3 | Time-window ensembling (no stacking); output = cross-sectional rank only | P8.2 | M | TODO |
 | P8.4 | IC + t-stat reporting; **automatic append of every configuration to `TESTING_LEDGER.md`** wired into the training entrypoint so a run cannot complete unlogged | P8.2 | M | TODO |
@@ -221,7 +221,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | CC.3 | MLflow service in compose + DVC init (data versioning for I2) | G2 | M | TODO |
 | CC.4 | [UI] Settings & Audit page: config viewer, scheduler management, backup status, immutable audit trail browser | CC.1 | L | TODO |
 | CC.5 | Playwright e2e harness + first critical-path test (loads dashboard, health visible); grows with each [UI] task | G1 | M | DONE |
-| CC.10 | **Frontend unit-test runner + coverage measurement** — §8 requires ≥70% frontend coverage, and CC.5 does not close it: there is no unit-test runner in `frontend/` at all (no Vitest/Jest/Testing Library) and Playwright as configured emits no coverage number. Three e2e tests are not a coverage measurement. Needs a component-test runner or V8 coverage collection wired into the Playwright run, before CC.6's ratchet can honestly enforce the frontend half | CC.5 | M | TODO |
+| CC.10 | **Frontend unit-test runner + coverage measurement** — §8 requires ≥70% frontend coverage, and CC.5 does not close it: there is no unit-test runner in `frontend/` at all (no Vitest/Jest/Testing Library) and Playwright as configured emits no coverage number. Three e2e tests are not a coverage measurement. Needs a component-test runner or V8 coverage collection wired into the Playwright run, before CC.6's ratchet can honestly enforce the frontend half | CC.5 | M | DONE |
 | CC.6 | Coverage ratchet: enforce ≥85% backend / ≥70% frontend in CI once each stack has meaningful surface (do not fake with trivial tests) | P2.8 | S | TODO |
 | CC.7 | Test-honesty guard (I6) in CI: pytest runs with `--runxfail` and a junit-based check fails the build on any skipped test; extend to the frontend runner when frontend tests exist | G1 | S | DONE (backend side; frontend extension when tests exist) |
 | CC.9 | **Database role separation** — migration-owner role owns schema and triggers; app role holds INSERT/SELECT only, so append-only cannot be disabled by the credential the app runs under. **Deadline: before Phase 11, and before the §6.11 audit log or `TESTING_LEDGER.md` integrity is presented as trustworthy** — 'immutable' is a false claim while the owning role can drop its own triggers, and DSR is only as honest as a ledger nobody can silently edit (D-017) | G10 | M | TODO |

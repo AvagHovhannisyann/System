@@ -60,6 +60,19 @@ jobs:
         run: npx tsc --noEmit
       - name: Build
         run: npm run build
+      - name: Unit/component tests + coverage (fails below §8's 70%)
+        run: npm run test:ci
+      - name: Test-honesty guard (I6 — a skipped test counts as a failure)
+        run: |
+          python3 -c "
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse('vitest-junit.xml').getroot()
+          skipped = sum(int(s.get('skipped', 0)) for s in root.iter('testsuite'))
+          if skipped:
+              sys.exit(f'I6 violation: {skipped} skipped test(s) — DIRECTIVE.md section 2 I6')
+          print('I6 guard: zero skipped tests')
+          "
 
   e2e:
     runs-on: ubuntu-latest
