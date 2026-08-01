@@ -27,6 +27,12 @@ const eslintConfig = [
       "out/**",
       "build/**",
       "next-env.d.ts",
+      // Generated test artefacts: the v8/istanbul HTML coverage report ships
+      // its own vendored JS, and Playwright's report/trace output is a build
+      // product. Neither is source and neither is committed.
+      "coverage/**",
+      "playwright-report/**",
+      "test-results/**",
     ],
   },
 ];
