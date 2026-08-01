@@ -62,6 +62,27 @@ critical path for invariant I1: a statement shape
 sanctioned, so it raises at the cursor boundary instead of executing
 unversioned. Rewrite coverage is a usability property here; enforcement is
 the guard's.
+
+The same inversion now covers the as-of **value**, not just the set of
+tables. A statement can be perfectly versioned in shape and still be executed
+with the wrong instant, because SQLAlchemy's compiled-statement cache makes
+two rewrites of one shape at different as-of values share a cache key: if the
+rewrite scatters the as-of across several differently-keyed bind parameters,
+a cache hit resolves some of them from the value frozen into the cached
+compiled object — the earlier execution's as-of — and the query silently
+reads the store at that instant instead. Two mechanisms close it, and both
+are required:
+
+- :func:`_rewrite_select` builds every versioned subquery of one statement
+  against a **single explicitly-keyed bind**
+  (:func:`backend.db._guard.as_of_bind`), so exactly one parameter carries
+  the value and the cache can only resolve it from the current execution;
+- the rewritten statement is checked for that invariant
+  (:func:`_assert_single_as_of_bind`), and the session's as-of travels with
+  the execution's sanction so the Core guard re-verifies, at the cursor
+  boundary, that the values *actually being sent* equal it
+  (``backend.db._guard._verify_as_of_binds``). Both raise
+  :class:`AsOfBindIntegrityError` and neither trusts the rewrite's output.
 """
 
 from __future__ import annotations
@@ -76,7 +97,11 @@ from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql.dml import UpdateBase
 
 from backend.db._guard import (
+    AS_OF_BIND_KEY,
+    AsOfBindIntegrityError,
     BitemporalBypassError,
+    as_of_bind,
+    collect_as_of_binds,
     collect_dml_read_references,
     collect_references,
     mark_rewritten_subquery,
@@ -93,12 +118,14 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import ORMExecuteState
     from sqlalchemy.orm.util import AliasedClass, AliasedInsp
     from sqlalchemy.sql import ClauseElement
+    from sqlalchemy.sql.elements import BindParameter
 
     from backend.db.bitemporal import BitemporalMixin
 
 __all__ = [
     "AS_OF_INFO_KEY",
     "WRITER_INFO_KEY",
+    "AsOfBindIntegrityError",
     "AsOfTimestampError",
     "BitemporalBypassError",
     "BitemporalRewriteError",
@@ -224,24 +251,31 @@ def _bitemporal_class_by_table_name() -> dict[str, type[BitemporalMixin]]:
     return mapping
 
 
-def _versioned_entity(cls: type[BitemporalMixin], as_of_ts: dt.datetime) -> AliasedClass[Any]:
-    """Build the D-011 versioned form of one bitemporal entity at ``as_of_ts``.
+def _versioned_entity(
+    cls: type[BitemporalMixin], as_of_param: BindParameter[dt.datetime]
+) -> AliasedClass[Any]:
+    """Build the D-011 versioned form of one bitemporal entity at ``as_of_param``.
 
     Two nested subqueries over the entity's table:
 
     1. ``DISTINCT ON (*logical key, valid_from) ... WHERE knowledge_time <=
        :as_of ORDER BY *key, valid_from, knowledge_time DESC`` — the latest
-       version knowable at ``as_of_ts`` per fact (unique winner: the PK
+       version knowable at the as-of instant per fact (unique winner: the PK
        forbids equal ``knowledge_time`` within a group);
     2. ``WHERE NOT is_retraction`` — a winning retraction hides the fact.
 
     Returned as ``aliased(cls, <subquery>)`` so ORM entity mapping survives
     the substitution. Both subqueries carry the module-private rewriter
     token (unforgeable; names are cosmetic).
+
+    ``as_of_param`` is the **shared** bind object of the whole rewrite
+    (:func:`backend.db._guard.as_of_bind`), not a timestamp: every versioned
+    subquery in one statement must carry one bind identity, or the compiled
+    cache can resolve some of them from a previous execution's value (see
+    :func:`_rewrite_select`).
     """
     table = cast("sa.Table", cast("Any", cls).__table__)
     key_columns = [table.c[name] for name in cls.__bitemporal_key__]
-    as_of_param = sa.literal(as_of_ts, sa.DateTime(timezone=True))
     versions = mark_rewritten_subquery(
         select(table)
         .where(table.c.knowledge_time <= as_of_param)
@@ -273,10 +307,32 @@ def _rewrite_select(
     every remaining reference — WHERE, ORDER BY, joins, subqueries — onto the
     versioned subquery. Assumes ``touched_tables`` came from
     :func:`backend.db._guard.collect_references` on this statement.
+
+    **One bind identity for the whole statement.** All versioned subqueries
+    are built against a single explicitly-keyed
+    :func:`~backend.db._guard.as_of_bind`, shared across every touched table.
+    This is not a tidiness preference; it is what keeps the as-of value
+    correct under SQLAlchemy's compiled-statement cache. With one adapter pass
+    per table, a later pass clones a tree that already contains an earlier
+    table's versioned subquery — so an *anonymous* as-of bind (``sa.literal``,
+    or any ``unique=True`` bindparam) becomes several parameters with
+    different keys, because ``BindParameter._clone`` re-keys anonymous binds.
+    Two rewrites of one shape at different as-of values then compile to equal
+    cache keys while the compiler's cache-key-to-bind matching (which pairs by
+    ``.key`` across the clone lineage) cannot relate every parameter, and a
+    cache hit resolves the unmatched ones from the value baked into the
+    *cached* compiled object — the first execution's as-of. An explicit key
+    survives cloning unchanged, so however many copies adaption makes, the
+    compiler sees one parameter and resolves it from the current execution.
+    Verified empirically against the installed SQLAlchemy (2.0.51) rather than
+    assumed, and re-verified on every execution at the cursor boundary
+    (:mod:`backend.db._guard`) — the cache is left enabled, because disabling
+    it would tax every as-of query forever while treating a symptom.
     """
     class_by_table = _bitemporal_class_by_table_name()
+    as_of_param = as_of_bind(as_of_ts)
     replacements: dict[Any, AliasedClass[Any]] = {
-        class_by_table[name]: _versioned_entity(class_by_table[name], as_of_ts)
+        class_by_table[name]: _versioned_entity(class_by_table[name], as_of_param)
         for name in sorted(touched_tables)
     }
     column_exprs = [description["expr"] for description in statement.column_descriptions]
@@ -288,6 +344,50 @@ def _rewrite_select(
         adapter = cast("AliasedInsp[Any]", inspect(replacement))._adapter
         statement = adapter.traverse(statement)
     return statement
+
+
+def _assert_single_as_of_bind(statement: Select[Any], as_of_ts: dt.datetime) -> None:
+    """Fail closed unless the rewritten statement carries exactly one as-of value.
+
+    The post-rewrite invariant, checked on the statement itself before it is
+    handed back to the ORM. Two claims, and the first is the one the
+    compiled-cache defect violated:
+
+    1. **exactly one distinct as-of bind key.** Several keys means several
+       parameters carrying the same logical value, which is the precondition
+       for the compiled cache to resolve some of them from an earlier
+       execution (:func:`_rewrite_select`). The count of bind *objects* is
+       deliberately not checked — clause adaption legitimately clones them,
+       and cloning is harmless exactly as long as the key is preserved, which
+       is what makes the key the identity that matters.
+    2. **every as-of bind holds this session's as-of**, so a foreign bind
+       colliding with :data:`~backend.db._guard.AS_OF_BIND_KEY` cannot
+       silently override the instant (SQLAlchemy resolves same-key binds to
+       one parameter without complaint).
+
+    At least one as-of bind must exist: this runs only for statements the
+    rewriter versioned, and every versioned subquery carries the predicate.
+    Raises :class:`~backend.db._guard.AsOfBindIntegrityError`; the independent
+    check on the values actually sent happens at the cursor boundary.
+    """
+    binds = collect_as_of_binds(statement)
+    keys = {bind.key for bind in binds}
+    if keys != {AS_OF_BIND_KEY}:
+        msg = (
+            f"as-of rewrite produced {len(keys)} distinct as-of bind key(s) "
+            f"{sorted(keys)} over {len(binds)} bind(s); exactly one key "
+            f"({AS_OF_BIND_KEY!r}) is required, because several keys let "
+            "SQLAlchemy's compiled-statement cache resolve one of them from a "
+            "previous execution's as_of. Refusing to execute (fail-closed per I1)"
+        )
+        raise AsOfBindIntegrityError(msg)
+    wrong = sorted({str(bind.value) for bind in binds if bind.value != as_of_ts})
+    if wrong:
+        msg = (
+            f"as-of rewrite produced bind value(s) {wrong} but this session bound "
+            f"as_of {as_of_ts.isoformat()}; refusing to execute (fail-closed per I1)"
+        )
+        raise AsOfBindIntegrityError(msg)
 
 
 def _reject_textual_bitemporal(statement: TextClause, table_names: frozenset[str]) -> None:
@@ -337,7 +437,12 @@ def _enforce_bitemporal_reads(execute_state: ORMExecuteState) -> None:
       form and its execution marked sanctioned for the Core guard; shapes the
       rewriter cannot handle raise :class:`BitemporalRewriteError`
       (fail-closed), verified by re-walking the rewritten statement for
-      residual raw references.
+      residual raw references. The rewritten statement must also carry
+      exactly one as-of bind key holding exactly this session's as-of
+      (:func:`_assert_single_as_of_bind`), and the session's as-of travels
+      with the sanction as **ground truth** so the Core guard can re-check
+      the values actually sent at the cursor boundary — neither the shape nor
+      the value of the rewrite is taken on trust.
 
     Statements this hook finds clean are returned **unsanctioned** on
     purpose: the Core guard then judges them on their compiled SQL, so a
@@ -403,7 +508,8 @@ def _enforce_bitemporal_reads(execute_state: ORMExecuteState) -> None:
             "form; use a plain ORM Select (fail-closed per I1)"
         )
         raise BitemporalRewriteError(msg)
-    rewritten = _rewrite_select(statement, refs.plain, cast("dt.datetime", bound_as_of))
+    as_of_ts = cast("dt.datetime", bound_as_of)
+    rewritten = _rewrite_select(statement, refs.plain, as_of_ts)
     residual = collect_references(rewritten, table_names)
     if residual:
         msg = (
@@ -412,5 +518,6 @@ def _enforce_bitemporal_reads(execute_state: ORMExecuteState) -> None:
             "(fail-closed per I1)"
         )
         raise BitemporalRewriteError(msg)
+    _assert_single_as_of_bind(rewritten, as_of_ts)
     execute_state.statement = rewritten
-    execute_state.update_execution_options(**sanctioned_execution_options())
+    execute_state.update_execution_options(**sanctioned_execution_options(as_of_ts))

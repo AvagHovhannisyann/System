@@ -37,6 +37,7 @@ _BANNED_MODULE = "backend.db." + "engine"
 _BANNED_FROM_IMPORT = "from backend.db import " + "engine"
 
 _EXPECTED_PUBLIC_SURFACE = {
+    "AsOfBindIntegrityError",
     "AsOfTimestampError",
     "BitemporalBypassError",
     "BitemporalRewriteError",

@@ -95,6 +95,48 @@ token via :func:`mark_rewritten_subquery` (an instance attribute, which
 survives SQLAlchemy's clause-adaption cloning) so the reference walker can
 prune them; a user naming a subquery ``_bitemporal_anything`` gets no
 exemption.
+
+The as-of value itself gets the same treatment, for the same reason
+-------------------------------------------------------------------
+
+The rewrite is only correct if the ``knowledge_time <= :as_of`` predicate it
+installs is executed with *this* query's as-of instant. Under SQLAlchemy's
+compiled-statement cache that is not automatic: two rewrites of one statement
+shape at different as-of values produce **equal cache keys**, so the second
+execution reuses the first's ``Compiled`` object and resolves its parameters
+positionally against it. If the rewrite scatters the as-of value across
+several :class:`~sqlalchemy.sql.elements.BindParameter` objects with
+*different* keys (which anonymous binds acquire the moment clause adaption
+clones them — ``BindParameter._clone`` regenerates the anon key), the
+compiler's cache-key-to-bind matching (which pairs by ``.key`` over the clone
+lineage) silently fails to relate one of them, and ``construct_params`` falls
+back to the value **baked into the cached compiled object at first compile**.
+The result is a query that reads the store as of some earlier execution's
+instant — a direct I1 violation on the sanctioned read path.
+
+Two mechanisms close that, both here:
+
+1. **One bind identity.** :func:`as_of_bind` mints the single, explicitly
+   keyed (:data:`AS_OF_BIND_KEY`), TIMESTAMPTZ-typed bind that every versioned
+   subquery of one rewrite shares, marked with a private token that survives
+   cloning (:func:`mark_as_of_bind`). An explicit key is preserved by
+   ``_clone``, so however many times adaption copies the bind, the compiler
+   sees one parameter name and ``construct_params`` resolves it from the
+   current execution.
+2. **Verification against ground truth at the boundary**
+   (:func:`_verify_as_of_binds`), because a rewrite must not be trusted to
+   have produced correct values — the same inversion the default-deny SQL
+   scan applies to references. The sanctioned execution carries the session's
+   bound as-of alongside its sanction token
+   (:func:`sanctioned_execution_options`); at ``before_cursor_execute`` the
+   values *actually resolved for this execution* are compared against it and
+   any disagreement raises :class:`AsOfBindIntegrityError` instead of
+   executing. This reads ``context.compiled_parameters``, which
+   ``construct_params`` recomputes per execution, so a stale value served by
+   a cache hit is visible to it — the check cannot be fooled by the cache
+   that causes the defect. It is fail-closed in both directions: an execution
+   that declares an as-of but sends no as-of bind raises just as loudly as
+   one that sends the wrong value.
 """
 
 from __future__ import annotations
@@ -102,15 +144,16 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any, Final, NamedTuple, cast
 
-from sqlalchemy import event
+from sqlalchemy import DateTime, bindparam, event
 from sqlalchemy.sql.ddl import ExecutableDDLElement
 from sqlalchemy.sql.dml import UpdateBase
-from sqlalchemy.sql.elements import ClauseElement, ColumnClause, TextClause
+from sqlalchemy.sql.elements import BindParameter, ClauseElement, ColumnClause, TextClause
 from sqlalchemy.sql.selectable import Alias, SelectBase, Subquery, TableClause
 
 from backend.db.bitemporal import bitemporal_classes
 
 if TYPE_CHECKING:
+    import datetime as dt
     from collections.abc import Mapping, Sequence
 
     from sqlalchemy.engine import Connection, Engine
@@ -118,13 +161,18 @@ if TYPE_CHECKING:
     from sqlalchemy.sql import Executable
 
 __all__ = [
+    "AS_OF_BIND_KEY",
     "SANCTION_EXECUTION_OPTION",
+    "AsOfBindIntegrityError",
     "BitemporalBypassError",
     "References",
+    "as_of_bind",
+    "collect_as_of_binds",
     "collect_dml_read_references",
     "collect_references",
     "fact_table_names",
     "install_core_guard",
+    "mark_as_of_bind",
     "mark_rewritten_subquery",
     "sanctioned_execution_options",
     "scan_sql_text",
@@ -162,6 +210,43 @@ docstring). Like the option key above, the name is not a secret: the grant is
 a :class:`_CoreSanction` whose token is checked with ``is``.
 """
 
+AS_OF_BIND_KEY: Final = "_bitemporal_as_of"
+"""The one bind-parameter key every as-of predicate in a rewritten statement uses.
+
+Explicit (so ``BindParameter._clone`` preserves it — anonymous ``unique``
+binds get a *fresh* key on every clone, which is what let the compiled cache
+resolve a stale value) and distinctive enough that no application query would
+choose it by accident. It is not a secret and carries no trust: a user bind
+that happened to share the key would be checked against the session's bound
+as-of like any other and rejected on mismatch.
+"""
+
+_AS_OF_BIND_MARKER_ATTR: Final = "_bitemporal_as_of_bind_token"
+"""Instance-attribute name under which rewriter-built as-of binds carry their token.
+
+An instance attribute for the same reason :data:`_SUBQUERY_MARKER_ATTR` is
+one: it survives clause-adaption cloning, so every copy of the as-of bind the
+rewrite leaves in the tree remains recognizable as *ours*. This is what makes
+the post-rewrite "exactly one as-of bind key" invariant meaningful rather
+than circular — binds are recognized by the token, so a rewrite that minted
+several differently-keyed as-of binds (the defect this guards) is detected
+rather than overlooked.
+"""
+
+_AS_OF_BIND_TOKEN: Final[object] = object()
+"""Unforgeable marker for as-of binds built by the rewriter itself."""
+
+_AS_OF_EXPECTATION_OPTION: Final = "_bitemporal_as_of_expectation"
+"""Execution-option key carrying the session's bound as-of as ground truth.
+
+Set by :mod:`backend.db.asof` on the statements it rewrites, read at
+``before_cursor_execute`` by :func:`_verify_as_of_binds`. The payload is an
+:class:`_AsOfExpectation` whose token is compared with ``is``, so a value
+written under this key by anything outside this module is inert (and, being
+inert, fails closed: an as-of bind with no valid expectation to check it
+against is refused).
+"""
+
 
 class BitemporalBypassError(RuntimeError):
     """A statement would have reached a bitemporal fact table unsanctioned.
@@ -183,6 +268,129 @@ class BitemporalBypassError(RuntimeError):
     The message names the offending table(s) and the sanctioned read path
     (``backend.db.as_of``).
     """
+
+
+class AsOfBindIntegrityError(BitemporalBypassError):
+    """A statement's as-of bind value is not exactly the session's bound as-of.
+
+    The backstop for the *value* half of invariant I1: the rewrite may put the
+    versioned form in the right shape and still send the wrong instant to the
+    database — most insidiously via SQLAlchemy's compiled-statement cache,
+    where two rewrites at different as-of values share a cache key and a stale
+    value baked into the cached ``Compiled`` object gets resolved instead of
+    this execution's (module docstring).
+
+    Raised, always before any row leaves the database, when:
+
+    - a rewritten statement carries as-of binds with more than one distinct
+      bind key, or with a value other than the session's bound as-of
+      (post-rewrite invariant, :mod:`backend.db.asof`);
+    - the values actually resolved for an execution disagree with the as-of
+      that sanctioned it, or the execution declares an as-of yet sends no
+      as-of bind at all, or sends as-of binds with no valid expectation to
+      check them against (Core guard, :func:`_verify_as_of_binds`).
+
+    A subclass of :class:`BitemporalBypassError` because it is the same
+    failure in the end — data leaving the store at an instant nobody asked
+    for — so every existing catch site treats it identically.
+    """
+
+
+class _AsOfExpectation(NamedTuple):
+    """Ground truth for one execution: the as-of its session actually bound.
+
+    - ``token``: the module-private sanction object, compared by identity, so
+      an expectation planted in execution options by anything but this module
+      is inert;
+    - ``as_of``: the timezone-aware UTC instant every as-of bind of this
+      execution must equal, exactly.
+    """
+
+    token: object
+    as_of: dt.datetime
+
+
+def as_of_bind(as_of_ts: dt.datetime) -> BindParameter[dt.datetime]:
+    """Return *the* as-of bind for one rewrite: one key, one identity, one value.
+
+    Explicitly keyed :data:`AS_OF_BIND_KEY` and typed ``TIMESTAMPTZ``
+    (matching every fact table's ``knowledge_time`` column), and marked with
+    the rewriter's private token. ``unique=False`` is the load-bearing part:
+    a unique/anonymous bind is re-keyed by every ``_clone``, and clause
+    adaption clones freely, so anonymous binds turn one as-of value into
+    several unrelated parameters that the compiled cache then resolves
+    inconsistently. Callers must share the returned object across every
+    versioned subquery of a single rewrite. Units: an absolute instant; the
+    predicate it feeds is ``knowledge_time <= as_of`` (inclusive).
+    """
+    return mark_as_of_bind(
+        bindparam(AS_OF_BIND_KEY, value=as_of_ts, type_=DateTime(timezone=True), unique=False)
+    )
+
+
+def mark_as_of_bind(bind: BindParameter[dt.datetime]) -> BindParameter[dt.datetime]:
+    """Mark a bind as the rewriter's own as-of parameter and return it.
+
+    The marker is a module-private token stored as an instance attribute, so
+    it survives clause-adaption cloning; only :func:`as_of_bind` calls this.
+    Setting the attribute without the token grants nothing — membership is
+    checked with ``is``.
+    """
+    bind.__dict__[_AS_OF_BIND_MARKER_ATTR] = _AS_OF_BIND_TOKEN
+    return bind
+
+
+def _is_as_of_bind(element: object) -> bool:
+    """True when ``element`` is a bind carrying the as-of value.
+
+    Recognized two ways, deliberately: by the private token (which survives
+    cloning, so every copy the rewrite leaves behind is caught even if it was
+    re-keyed) **or** by :data:`AS_OF_BIND_KEY` (so a foreign bind that
+    collides with our key is checked rather than silently overriding the
+    as-of — SQLAlchemy resolves same-key binds to a single parameter, last
+    one compiled winning, with no error).
+    """
+    if not isinstance(element, BindParameter):
+        return False
+    return (
+        getattr(element, _AS_OF_BIND_MARKER_ATTR, None) is _AS_OF_BIND_TOKEN
+        or element.key == AS_OF_BIND_KEY
+    )
+
+
+def collect_as_of_binds(element: ClauseElement) -> tuple[BindParameter[Any], ...]:
+    """Return every as-of bind in a clause tree, in traversal order.
+
+    Traversal follows ``get_children()`` and, unlike
+    :func:`collect_references`, **does not prune** the rewriter's own
+    subqueries — they are exactly where the as-of binds live. It also does not
+    detour through each column's owning table: that detour exists in the
+    reference walker to notice tables reached only through a column, and a
+    ``Table`` cannot contain a bind, so following it here would multiply the
+    traversal for nothing.
+
+    Used for the post-rewrite invariant. The authoritative check on what is
+    actually sent happens at the cursor boundary
+    (:func:`_verify_as_of_binds`), so a blind spot here degrades to a second,
+    louder net rather than to a leak.
+    """
+    found: list[BindParameter[Any]] = []
+    seen: set[int] = set()
+
+    def visit(elem: ClauseElement) -> None:
+        if id(elem) in seen:
+            return
+        seen.add(id(elem))
+        if _is_as_of_bind(elem):
+            found.append(cast("BindParameter[Any]", elem))
+            return
+        if isinstance(elem, TableClause):
+            return
+        for child in elem.get_children():
+            visit(child)
+
+    visit(element)
+    return tuple(found)
 
 
 def fact_table_names() -> frozenset[str]:
@@ -217,14 +425,25 @@ class References(NamedTuple):
         return bool(self.plain or self.aliased or self.textual)
 
 
-def sanctioned_execution_options() -> dict[str, object]:
+def sanctioned_execution_options(as_of: dt.datetime | None = None) -> dict[str, object]:
     """Return execution options marking one execution as sanctioned by the rewriter.
 
     Only :mod:`backend.db.asof` calls this, for statements it has itself
     rewritten to the versioned form (or column loads it exempts). The Core
     guard admits exactly these executions.
+
+    ``as_of`` is the session's bound as-of instant, supplied for a rewritten
+    read and omitted for a column load (which reads one physically
+    PK-addressed row and carries no as-of predicate). When supplied it travels
+    as **ground truth**, not as a value to use: :func:`_verify_as_of_binds`
+    compares the parameters actually resolved for the execution against it and
+    refuses the execution on any disagreement — including an execution that
+    declares an as-of but sends no as-of bind.
     """
-    return {SANCTION_EXECUTION_OPTION: _EXECUTION_SANCTION_TOKEN}
+    options: dict[str, object] = {SANCTION_EXECUTION_OPTION: _EXECUTION_SANCTION_TOKEN}
+    if as_of is not None:
+        options[_AS_OF_EXPECTATION_OPTION] = _AsOfExpectation(_EXECUTION_SANCTION_TOKEN, as_of)
+    return options
 
 
 def _is_sanctioned_execution(execution_options: Mapping[str, Any]) -> bool:
@@ -456,6 +675,120 @@ def _raise_unsanctioned_sql(tables: frozenset[str]) -> None:
     raise BitemporalBypassError(msg)
 
 
+def _observed_as_of_parameters(
+    context: ExecutionContext,
+) -> tuple[tuple[str, object], ...]:
+    """Return the ``(parameter name, value)`` pairs this execution sends as as-of.
+
+    Read from ``context.compiled_parameters`` — the mapping
+    ``Compiled.construct_params`` produces **for this execution**, which is
+    where a compiled-cache hit either does or does not carry the current
+    as-of through. Reading the ``Compiled`` object's own bind values instead
+    would report the values frozen at first compile and would therefore
+    always agree with itself: precisely the blindness this check exists to
+    remove.
+
+    As-of binds are located by :func:`_is_as_of_bind` over
+    ``Compiled.bind_names`` (whose keys are the bind objects that were
+    actually rendered), so binds re-keyed by cloning are still found through
+    their token.
+
+    Both attributes are read with ``getattr`` because they belong to
+    ``DefaultExecutionContext`` rather than to the ``ExecutionContext``
+    interface. A context that carries as-of binds but exposes no resolved
+    parameters is **not** waved through: it raises, because the whole point
+    of this function is that unverifiable is not the same as fine.
+    """
+    compiled = getattr(context, "compiled", None)
+    bind_names: Mapping[Any, str] | None = getattr(compiled, "bind_names", None)
+    if compiled is None or not bind_names:
+        return ()
+    escaped: Mapping[str, str] = getattr(compiled, "escaped_bind_names", None) or {}
+    names = {escaped.get(name, name) for bind, name in bind_names.items() if _is_as_of_bind(bind)}
+    if not names:
+        return ()
+    resolved: Sequence[Mapping[str, Any]] | None = getattr(context, "compiled_parameters", None)
+    if resolved is None:
+        _raise_as_of_integrity(
+            f"execution sends as-of bind parameter(s) {sorted(names)} but its "
+            f"{type(context).__name__} exposes no resolved compiled parameters, so "
+            "the values reaching the driver cannot be verified"
+        )
+        return ()
+    return tuple(
+        (name, parameters[name])
+        for parameters in resolved
+        for name in sorted(names)
+        if name in parameters
+    )
+
+
+def _raise_as_of_integrity(detail: str) -> None:
+    """Raise the fail-closed as-of value rejection with a specific ``detail``."""
+    msg = (
+        f"as-of bind integrity check failed before execution: {detail}. The as-of "
+        "instant a rewritten statement sends is verified against the session's "
+        "bound as_of at the SQL boundary rather than trusted from the rewrite, "
+        "because SQLAlchemy's compiled-statement cache can serve a Compiled object "
+        "whose baked-in bind values came from an earlier execution at a different "
+        "as_of. Refusing to execute (D-011/I1)"
+    )
+    raise AsOfBindIntegrityError(msg)
+
+
+def _verify_as_of_binds(context: ExecutionContext | None) -> None:
+    """Verify every as-of value this execution sends equals the sanctioning as-of.
+
+    The value-level counterpart of the default-deny SQL scan, and fail-closed
+    in every direction:
+
+    - **expectation present, no as-of bind sent** — the rewrite claimed to
+      version a read and the statement reaching the driver carries no as-of
+      predicate parameter. Something dropped it; refuse.
+    - **as-of bind sent, no valid expectation** — nothing vouched for the
+      value, so there is no ground truth to check it against. Refuse rather
+      than assume it is right (this also covers a foreign bind colliding with
+      :data:`AS_OF_BIND_KEY`, which SQLAlchemy would otherwise let silently
+      override the as-of).
+    - **value disagrees with the expectation** — the leak itself. Refuse.
+
+    Runs on every execution, before the sanction short-circuit, so no
+    statement can skip it by being otherwise admissible.
+    """
+    if context is None:
+        return
+    expectation = context.execution_options.get(_AS_OF_EXPECTATION_OPTION)
+    declared = (
+        expectation
+        if isinstance(expectation, _AsOfExpectation)
+        and expectation.token is _EXECUTION_SANCTION_TOKEN
+        else None
+    )
+    observed = _observed_as_of_parameters(context)
+    if not observed:
+        if declared is not None:
+            _raise_as_of_integrity(
+                f"execution declares as_of {declared.as_of.isoformat()} but sends no "
+                "as-of bind parameter at all, so no knowledge_time predicate can be "
+                "carrying it"
+            )
+        return
+    if declared is None:
+        _raise_as_of_integrity(
+            f"execution sends as-of bind parameter(s) {sorted({n for n, _ in observed})} "
+            "but carries no as-of expectation from the as_of() session that could "
+            "vouch for them"
+        )
+        return
+    wrong = [(name, value) for name, value in observed if value != declared.as_of]
+    if wrong:
+        _raise_as_of_integrity(
+            f"execution sends as-of bind value(s) {[(n, str(v)) for n, v in wrong]} "
+            f"but the session bound as_of {declared.as_of.isoformat()}; a query would "
+            "have read the store at an instant nobody asked for"
+        )
+
+
 def _raise_structural(tables: frozenset[str], capacity: str) -> None:
     """Raise the Core-guard rejection for a compiled statement reading fact tables."""
     msg = (
@@ -555,7 +888,15 @@ def _core_before_cursor_execute(
     :func:`collect_references` cannot see is never sanctioned, so it is
     refused here on the strength of the SQL text alone instead of executing
     unversioned.
+
+    Two independent questions are answered here, and both must pass. *Which
+    tables* may be read is the default-deny scan below. *At which instant*
+    they are read is :func:`_verify_as_of_binds`, run first and unconditionally
+    — a correctly versioned statement executed with a stale as-of value is a
+    leak the SQL text cannot show, so a sanction must not exempt an execution
+    from having its as-of values checked.
     """
+    _verify_as_of_binds(context)
     if context is not None and _is_sanctioned_execution(context.execution_options):
         return
     mentioned = scan_sql_text(statement, fact_table_names())

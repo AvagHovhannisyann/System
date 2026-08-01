@@ -20,6 +20,7 @@ the ORM models triggers it, so app-constructed sessions cannot dodge it.
 """
 
 from backend.db.asof import (
+    AsOfBindIntegrityError,
     AsOfTimestampError,
     BitemporalBypassError,
     BitemporalRewriteError,
@@ -29,6 +30,7 @@ from backend.db.asof import (
 from backend.db.engine import create_admin_engine, dispose_database
 
 __all__ = [
+    "AsOfBindIntegrityError",
     "AsOfTimestampError",
     "BitemporalBypassError",
     "BitemporalRewriteError",
