@@ -298,3 +298,57 @@ unverifiable, and DSR is only as honest as its trial count (§9.7). The deadline
 Phase 11 — not "before real capital", because there is no real capital in this system by
 design (§1.1); the binding constraint is the point at which the platform starts making
 integrity claims to its operator.
+
+## D-018 — The as-of *value* is verified at the boundary, not trusted (P2.11) (2026-08-01)
+
+**Amends D-012, which listed four mechanisms. This is the fifth, and it exists because
+the first four were all satisfied while an I1 leak ran in production shape.**
+
+**Context.** D-012's mechanisms all guarantee properties of the emitted **SQL**: that
+every fact-table reference sits inside the versioned form, that nothing unsanctioned
+reaches the driver. The depth suite (P2.12) found a leak where **the SQL was entirely
+correct and only the bind value was wrong**: SQLAlchemy pairs cache-key binds to compiled
+binds by `.key` across the clone lineage, and `BindParameter._clone` regenerates the key
+of *anonymous* binds — which `sa.literal()` produces. A second clause-adapter pass over
+an already-substituted tree therefore produced a compiled bind whose key lineage was
+disjoint from the cache key; `construct_params` fell back to the value frozen at first
+compile. Re-executing one statement at a second as-of instant read the store **as of the
+first**. Structural verification cannot see this class of defect at all.
+
+**Decision.** Two additions, both fail-closed:
+1. **One bind identity.** Every versioned subquery in a rewrite shares a single
+   explicitly-keyed, non-unique as-of bindparam. An explicit key survives `_clone`, so
+   all copies collapse to one parameter. A post-rewrite invariant asserts exactly one
+   distinct as-of bind key carrying the session's value — a regression to anonymous
+   per-table binds is *detected*, not tolerated.
+2. **Boundary verification.** At the cursor boundary, the as-of values **actually being
+   sent** are compared against ground truth carried with the sanction token, read from
+   `context.compiled_parameters` (recomputed per execution, so a cache hit's stale value
+   is visible). Mismatch, expectation-without-bind, bind-without-expectation, and a
+   context exposing no resolved parameters all raise `AsOfBindIntegrityError`.
+
+**Reasoning.** Same principle as the default-deny inversion in D-012: *do not trust that
+the rewrite produced the right thing — verify against ground truth at the boundary where
+truth is observable.* The rewriter is a heuristic over clause trees interacting with a
+compiled-statement cache neither we nor SQLAlchemy documents as bind-stable under
+repeated adaptation. Verifying the value that actually reaches the driver makes the
+whole class unshippable, rather than patching the one instance found.
+
+**Rejected.** `execution_options={'compiled_cache': None}` — the obvious "fix". It works,
+and it is wrong: measured **+1.75 ms (+16.6 %) per as-of query, permanently**, roughly
+six times the cost of the verification checks (~0.3 ms against a 5.96 ms rewrite, below
+the end-to-end noise floor), and it treats the symptom while leaving the bind-identity
+defect in place for any future code path that rebuilds the cache.
+
+**Testing note (why the regression test is not vacuous).** The test proving the backstop
+fires reinstalls the pre-fix mechanism and asserts the second execution raises having
+executed nothing. A companion test *disables* the backstop and asserts the leak actually
+reappears — so if SQLAlchemy ever stops producing this behavior, the companion fails
+loudly instead of the backstop test silently passing for the wrong reason.
+
+**Standing lesson for later phases.** A property suite that randomizes *data* while
+holding *query shape* fixed measures breadth, not correctness. 75,936 breadth cases
+passed while this leak was live; it took nesting depth as a first-class strategy
+dimension to reach the shape. Any future property suite (labels P6.4, optimizer P9.4,
+cost model, backtest engine) must randomize the *structure* of what it exercises, not
+only the values fed through one fixed structure.
