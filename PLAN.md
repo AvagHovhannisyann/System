@@ -129,10 +129,10 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P6.1 | [ER] Triple-barrier engine: upper/lower barriers sized by trailing volatility, vertical barrier per horizon (5d, 21d, 63d); math documented in `DECISIONS.md` before code | G4 | L | TODO |
-| P6.2 | Residualization of returns vs market + sector prior to labeling | P6.1 | M | TODO |
-| P6.3 | Sample-uniqueness weights from label overlap; effective-sample-size computation | P6.1 | L | TODO |
-| P6.4 | Property tests: barrier-touch correctness on constructed paths, weight normalization, overlap ⇒ down-weighting proof, ESS report artifact | P6.2, P6.3 | L | TODO |
+| P6.1 | [ER] Triple-barrier engine: upper/lower barriers sized by trailing volatility, vertical barrier per horizon (5d, 21d, 63d); math documented in `DECISIONS.md` before code | G4 | L | DONE |
+| P6.2 | Residualization of returns vs market + sector prior to labeling | P6.1 | M | DONE |
+| P6.3 | Sample-uniqueness weights from label overlap; effective-sample-size computation | P6.1 | L | DONE |
+| P6.4 | Property tests: barrier-touch correctness on constructed paths, weight normalization, overlap ⇒ down-weighting proof, ESS report artifact | P6.2, P6.3 | L | DONE |
 | P6.5 | **Gate G6:** distribution-sanity across regimes + P6.4 suite green | P6.4 | S | TODO |
 
 ## Phase 7 — LLM extraction pipeline (parallel track after P3.2)

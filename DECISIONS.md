@@ -482,3 +482,66 @@ CI results were reported as green when no workflow had run at all.
 care while editing fixes a mode that produces no signal. The local gate (full suite, ruff,
 `mypy --strict`) was run before each of those commits, so nothing shipped untested — but
 "CI is green" was not a true statement, and the fix is a check rather than more diligence.
+
+## D-023 — Label construction mathematics (P6) (2026-08-01)
+
+Named by §0.3 as an extended-reasoning component. The choices below are all places
+where a defensible-looking default would have quietly degraded every downstream model.
+
+**Barrier width = `multiple × σ_trailing × √horizon`.** The textbook fixed-daily-σ barrier
+is touched almost surely well before a 63-day deadline, which collapses the vertical class
+and makes the 63d label a slower copy of the 5d one — three horizons that are nominally
+different and substantively the same. `√H` scaling makes them comparable. Nothing is
+lost: `upper_multiple = k/√H` recovers the daily convention exactly.
+
+**The vertical barrier is its own class, not `sign(return)`.** Signing an unresolved
+return labels a +0.05σ drift identically to a +2σ breakout — maximum noise precisely
+where the path carried the least information. The realized return is retained so Phase 8
+can take the sign if it chooses, but as a decision rather than a default.
+
+**Both barriers pierced in one bar ⇒ `AMBIGUOUS`, flagged, never tie-broken.** Daily bars
+do not contain the intrabar ordering; inferring it from the close direction fabricates the
+missing fact (I3). Ambiguous rows are **not** folded into the vertical class — "we cannot
+tell" is not "neither was touched". A `LOWER_FIRST` policy exists but is opt-in and named
+for the assumption it makes, since "conservative" is only true for a long. **The ambiguity
+rate is a diagnostic:** if it is material on real data, the barrier widths are wrong, not
+the tie-break.
+
+**Volatility: fixed 20-bar rolling sample std, full window required.** Fixed rather than
+EWMA so "which bars produced this number" has a finite answer. Partial windows are
+refused because a 3-observation and a 20-observation std are different statistics, and
+mixing them makes early and late barriers incomparable *silently*.
+
+**Residualization freezes trailing OLS coefficients and applies them forward**, with the
+intercept **estimated but not subtracted**: omitting it biases the betas, while
+subtracting a trailing alpha from future returns would remove the very idiosyncratic drift
+the label exists to capture. Residual-path barriers are sized by trailing **residual**
+volatility — sizing them by total volatility gives a mostly-market stock a wide barrier
+that reads VERTICAL for reasons unrelated to itself.
+
+**Two guards that exist because the failure is silent:**
+- *Near-collinear factors raise*, judged on the **column-normalized** condition number so
+  the threshold measures collinearity rather than the scale gap between an intercept
+  column and a returns column. The residual is well defined under collinearity; the
+  *coefficients* are not, and the coefficients are what get applied forward. A rank check
+  alone would pass a near-duplicate sector.
+- *Residual-volatility noise floor.* A stock that is an exact combination of its factors
+  leaves residuals of order 1e-16 — a positive number that would size a barrier resolved
+  by the sign of rounding error. This caught a real defect in the track's own fixtures.
+
+**Uniqueness spans differ from `PurgedKFold`'s by half a bar, deliberately.** Purging
+includes the event bar because purging one extra observation is conservative; uniqueness
+must not, because there it would invent overlap and over-shrink the weights. Same-looking
+interval, opposite direction of safety.
+
+**Why this matters, measured:** on a constructed two-regime path, 518 labels at the 63d
+horizon carry an effective sample size of **11.15** (ratio 0.0215, peak concurrency 63).
+Training on 518 nominal observations as if they were independent would overstate the
+evidence by roughly fortyfold.
+
+**Not claimed:** G6 remains open. Regime invariance is proven on constructed paths, but
+"label distribution sane across regimes" is a *measurement on real equities* and is
+blocked on B1. Defaults (barrier multiples 1.0/1.0, 20-bar volatility, 252-bar estimation,
+condition limit 1e8, noise-floor ratio 1e-8) are defensible, **not calibrated** — and
+every variant tried in calibrating them belongs in `TESTING_LEDGER.md`, because they feed
+the Deflated Sharpe trial count (§9.7).
