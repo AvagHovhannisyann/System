@@ -50,13 +50,16 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     ForeignKey,
+    ForeignKeyConstraint,
     Identity,
     Integer,
     Numeric,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.db.base import Base
@@ -787,5 +790,498 @@ class ExtractionModelAssignment(Base):
         doc=(
             "When this version was recorded, UTC, from the database clock at transaction "
             "start (never the caller's). Ordering key for a task is `version`, not this."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 tables (P7.3/P7.6/P7.10, migration 0010): the extraction framework
+#
+# Four tables, all **append-only** by trigger, holding what an extraction run
+# produced and the prompt versions it produced it under.
+#
+# None is bitemporal, for the reason recorded above the P7.1 tables and in
+# revisions 0005/0007/0009: the bitemporal columns describe when a fact was
+# true in the world and when it became knowable to the *market* (D-011). A
+# prompt version, an activation, a golden-set score and an extraction result
+# are all things **we** did to our own system. They have no market
+# knowability, and a `knowledge_time` invented for them would be a fabricated
+# value in the one column whose meaning is that it is not fabricated (I3).
+#
+# None is a hypertable either: a prompt library is a human-sized collection,
+# and extraction results are keyed by document rather than by an event-time
+# axis worth chunking on.
+# ---------------------------------------------------------------------------
+
+
+class ExtractionPromptVersion(Base):
+    """One immutable, content-addressed version of one prompt (§6.5, P7.10).
+
+    A prompt version has no version *number* and no mutable "current text"
+    row: its identity **is** :attr:`version_hash`, a digest of its own content
+    (:mod:`backend.extraction.prompts.versioning`). Three consequences shape
+    this table:
+
+    - two writings of the same prompt are the same row, so saving is
+      idempotent on ``(name, version_hash)`` and that pair is unique;
+    - editing a prompt cannot edit a version — it produces a different address
+      — so nothing here is ever updated, enforced by migration 0010's
+      ``BEFORE UPDATE OR DELETE`` trigger rather than by convention;
+    - **rollback is selection, not mutation** (§6.5's "one-click rollback"):
+      it is an activation naming an earlier hash, so the version returned to
+      is byte-identical to the one that was measured and the golden-set score
+      attached to that hash still describes the text now in force.
+
+    :attr:`schema_digest` is part of the content address and therefore part of
+    what makes two versions different. Leaving it out would let a response
+    cached under an old output schema stay addressable by a prompt that now
+    demands a different shape.
+
+    Units: :attr:`sequence` is dimensionless, 1 for a prompt's first saved
+    version and +1 per new version, and is the ordering key — a clock can tie
+    and under concurrency can run backwards relative to the sequence of events
+    (:mod:`backend.db.audit`), so ``recorded_at`` answers "when" and this
+    answers "after what".
+    """
+
+    __tablename__ = "extraction_prompt_version"
+    __table_args__ = (
+        UniqueConstraint("name", "version_hash", name="uq_extraction_prompt_version_address"),
+        UniqueConstraint("name", "sequence", name="uq_extraction_prompt_version_sequence"),
+        CheckConstraint("name <> ''", name="name_not_empty"),
+        CheckConstraint("version_hash <> ''", name="version_hash_not_empty"),
+        CheckConstraint("template <> ''", name="template_not_empty"),
+        CheckConstraint("schema_digest <> ''", name="schema_digest_not_empty"),
+        CheckConstraint("actor <> ''", name="actor_not_empty"),
+        CheckConstraint("sequence >= 1", name="sequence_positive"),
+    )
+
+    prompt_version_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+        doc="Surrogate row key, database-generated. Dimensionless; not the content address.",
+    )
+    name: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "The prompt's identity, conventionally the extraction task it serves. Part of "
+            "the content address: two prompts sharing text are still two histories."
+        ),
+    )
+    version_hash: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "Content address: 32 lowercase hex characters over name, system, template and "
+            "schema_digest. Derived, never chosen; the cache's prompt_version component."
+        ),
+    )
+    system: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="System instruction sent with every call, verbatim.",
+    )
+    template: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="User-message template, a string.Template source whose only variable is $document.",
+    )
+    schema_digest: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "Digest of the Pydantic output model the response must satisfy. Part of the "
+            "address, so a schema change is a new prompt version — which is what it is."
+        ),
+    )
+    actor: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="Who saved it, as asserted by the caller — not an authenticated identity.",
+    )
+    notes: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="Free text explaining the change; NULL when none was given. Not in the address.",
+    )
+    correlation_id: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="Request id (D-003) it was saved under; NULL outside a request. Not in the address.",
+    )
+    sequence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="Dimensionless save order within one prompt: 1 for the first, +1 per version.",
+    )
+    recorded_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc=(
+            "When this version was first saved, UTC, from the database clock at transaction "
+            "start (never the caller's). Ordering key is `sequence`, not this."
+        ),
+    )
+
+
+class ExtractionPromptActivation(Base):
+    """One act of pointing a prompt at a version (§6.5, P7.10).
+
+    "Which version is in force" is a *pointer*, and moving it is a
+    configuration change, so it is an event — §6.11's rule that config changes
+    are events and not mutations, applied to prompts. The version in force is
+    the row with the greatest :attr:`sequence` for that prompt; there is no
+    "current version" column anywhere, because a column would be a state that
+    could disagree with its own history.
+
+    §6.5's **one-click rollback is an activation naming an earlier hash** — the
+    same call as moving forward. Nothing is restored because nothing was
+    destroyed. :attr:`is_rollback` records that the pointer moved *backwards*
+    and is derived from the activation history inside the writing transaction,
+    never asserted by the caller, so it cannot disagree with the record.
+
+    The composite foreign key to :class:`ExtractionPromptVersion` is the point
+    of the constraint, not decoration: activating a hash nobody saved would
+    leave the task with no resolvable prompt at its next call, and the failure
+    would surface far from the mistake.
+    """
+
+    __tablename__ = "extraction_prompt_activation"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("name", "version_hash"),
+            (
+                "extraction_prompt_version.name",
+                "extraction_prompt_version.version_hash",
+            ),
+            name="fk_extraction_prompt_activation_version",
+        ),
+        UniqueConstraint("name", "sequence", name="uq_extraction_prompt_activation_sequence"),
+        CheckConstraint("name <> ''", name="name_not_empty"),
+        CheckConstraint("version_hash <> ''", name="version_hash_not_empty"),
+        CheckConstraint("actor <> ''", name="actor_not_empty"),
+        CheckConstraint("sequence >= 1", name="sequence_positive"),
+        # A prompt's first activation has no predecessor and every later one
+        # does. Written as a constraint rather than trusted, because a NULL
+        # predecessor on a later activation would silently break the chain a
+        # reader walks to reconstruct which version was in force when.
+        CheckConstraint(
+            "(sequence = 1) = (previous_version_hash IS NULL)",
+            name="first_activation_has_no_predecessor",
+        ),
+    )
+
+    activation_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+        doc="Surrogate row key, database-generated. Dimensionless.",
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False, doc="The prompt whose pointer moved.")
+    version_hash: Mapped[str] = mapped_column(
+        Text, nullable=False, doc="Content address of the version put in force."
+    )
+    previous_version_hash: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="Address in force before this activation; NULL only on a prompt's first one.",
+    )
+    actor: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="Who activated it, as asserted by the caller — not an authenticated identity.",
+    )
+    correlation_id: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="Request id (D-003) it was activated under; NULL outside a request.",
+    )
+    sequence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="Dimensionless activation order within one prompt: 1 for the first, +1 each.",
+    )
+    is_rollback: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        doc=(
+            "True when this hash had already been in force earlier in this prompt's history "
+            "— i.e. the operator went back. Derived from the history, never asserted."
+        ),
+    )
+    recorded_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc=(
+            "When the pointer moved, UTC, from the database clock at transaction start. "
+            "Ordering key is `sequence`, not this."
+        ),
+    )
+
+
+class ExtractionGoldenScore(Base):
+    """One golden-set result, attached to one prompt version (§6.5, P7.10, D-014).
+
+    §5-P7 requires that any prompt change re-runs the golden set and that the
+    score is recorded. A score is bound to ``(name, version_hash)`` by a
+    foreign key, so it describes text that cannot change underneath it — a
+    score attached to a mutable prompt would silently start describing text it
+    never saw.
+
+    There is deliberately **no pass/fail column and no stored threshold.** Per
+    D-014, the directive's "≥ 85% agreement" is the operator's *prior*: a model
+    gate above the human labeller's own intra-rater agreement cannot be met by
+    any model, and one near it is measuring label noise. The floor has not been
+    measured yet (B3), so a threshold column would invite a fabricated number
+    in the one place a reader would take as authoritative (I3). Judging a score
+    is :func:`backend.extraction.prompts.store.golden_verdict`, which requires
+    the threshold *and the statement of where it came from*.
+
+    Units: :attr:`agreement` is a **fraction in [0, 1]**, never a percentage
+    (§8) — "85" versus "0.85" is exactly the silent unit bug §8 exists for.
+    :attr:`document_count` is a count of documents, recorded because agreement
+    over 12 documents and over 400 are not the same number.
+    """
+
+    __tablename__ = "extraction_golden_score"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("name", "version_hash"),
+            (
+                "extraction_prompt_version.name",
+                "extraction_prompt_version.version_hash",
+            ),
+            name="fk_extraction_golden_score_version",
+        ),
+        CheckConstraint("name <> ''", name="name_not_empty"),
+        CheckConstraint("version_hash <> ''", name="version_hash_not_empty"),
+        CheckConstraint("golden_set_id <> ''", name="golden_set_id_not_empty"),
+        CheckConstraint("actor <> ''", name="actor_not_empty"),
+        CheckConstraint("agreement >= 0 AND agreement <= 1", name="agreement_is_a_fraction"),
+        CheckConstraint("document_count >= 1", name="document_count_positive"),
+    )
+
+    score_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+        doc="Surrogate row key, database-generated. Dimensionless; also the ordering key.",
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False, doc="The prompt scored.")
+    version_hash: Mapped[str] = mapped_column(
+        Text, nullable=False, doc="Content address of the exact version scored."
+    )
+    golden_set_id: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "Identifier of the labelled set used, including its own version. Two scores are "
+            "comparable only when this matches; without it a 300-document set and a "
+            "500-document one would be mixed silently."
+        ),
+    )
+    agreement: Mapped[Decimal] = mapped_column(
+        Numeric(6, 5),
+        nullable=False,
+        doc="Agreement with the human labels: a fraction in [0, 1], never a percentage (§8).",
+    )
+    document_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, doc="Documents scored (count, >= 1)."
+    )
+    scored_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        doc=(
+            "When the scoring run finished, UTC. Supplied by the caller, not defaulted: the "
+            "run may have finished long before the row was written."
+        ),
+    )
+    actor: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="Who ran the scoring, as asserted by the caller — not an authenticated identity.",
+    )
+    notes: Mapped[str | None] = mapped_column(
+        Text, nullable=True, doc="Free text about the run; NULL when none was given."
+    )
+    recorded_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc="When the row was written, UTC, from the database clock. Distinct from scored_at.",
+    )
+
+
+class ExtractionResult(Base):
+    """One model call's extraction record: what was asked, and what came back (P7.3).
+
+    §5-P7's pipeline ends *"store with the prompt version hash"* and requires
+    raw responses to be stored. This is that row: one per model call — that is,
+    one per (task, document, chunk, prompt version, model) — holding
+    :attr:`raw_response` **verbatim**, the validated :attr:`output` when
+    validation accepted it, and :attr:`validation_errors` when it did not.
+
+    A rejected response is stored, not discarded. Re-asking the same model the
+    same question at temperature 0 would produce the same malformed answer and
+    cost money to rediscover, and the rejection is data about the prompt that
+    Gate G7 needs to be able to count.
+
+    **Append-only** (migration 0010's trigger). An extraction is an
+    observation, and every consumer treats it as evidence: the golden set
+    scores it (P7.8), the contamination probe differences it (P7.9), the
+    document inspector shows it (§6.5). Re-running is a new row, never an
+    overwrite — and if two rows for one address disagree, that disagreement is
+    itself the observation worth keeping, because it falsifies the determinism
+    the cache design rests on.
+
+    What is deliberately absent: the anonymization mapping, and the document
+    text in either form. The mapping is the one artifact that re-identifies a
+    document, and storing it beside the payload would make anonymization
+    decorative; :attr:`payload_digest` is enough to prove two extractions read
+    the same text and not enough to reconstruct it.
+
+    Units: :attr:`chunk_index` is 0-based and indexes the **anonymized**
+    document (:mod:`backend.extraction.tasks.pipeline` explains why masking
+    precedes chunking); token counts are counts **as reported by the
+    provider**, never estimated (I3); :attr:`latency_ms` is wall-clock
+    milliseconds.
+    """
+
+    __tablename__ = "extraction_result"
+    __table_args__ = (
+        CheckConstraint("task <> ''", name="task_not_empty"),
+        CheckConstraint("document_id <> ''", name="document_id_not_empty"),
+        CheckConstraint("prompt_version_hash <> ''", name="prompt_version_hash_not_empty"),
+        CheckConstraint("payload_digest <> ''", name="payload_digest_not_empty"),
+        CheckConstraint("model <> ''", name="model_not_empty"),
+        CheckConstraint("chunk_count >= 1", name="chunk_count_positive"),
+        CheckConstraint(
+            "chunk_index >= 0 AND chunk_index < chunk_count", name="chunk_index_in_range"
+        ),
+        CheckConstraint("input_tokens IS NULL OR input_tokens >= 0", name="input_tokens_counted"),
+        CheckConstraint(
+            "output_tokens IS NULL OR output_tokens >= 0", name="output_tokens_counted"
+        ),
+        CheckConstraint("latency_ms IS NULL OR latency_ms >= 0", name="latency_non_negative"),
+        # A response either validated or it did not, and the row must say which
+        # without a reader having to interpret two nullable columns
+        # independently: an output with errors beside it, or neither, would be a
+        # record nobody could act on.
+        CheckConstraint(
+            "(output IS NOT NULL) <> (jsonb_array_length(validation_errors) > 0)",
+            name="output_xor_validation_errors",
+        ),
+    )
+
+    result_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+        doc="Surrogate row key, database-generated. Dimensionless; also the ordering key.",
+    )
+    task: Mapped[str] = mapped_column(
+        Text, nullable=False, doc="Extraction task this record belongs to."
+    )
+    document_id: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "Source document identifier — an EDGAR accession, a transcript id, or for a "
+            "composed pair a derived id naming both sides. Provenance only: never sent to a "
+            "model and never part of a cache address."
+        ),
+    )
+    chunk_index: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="0-based position of this chunk within the anonymized document.",
+    )
+    chunk_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, doc="Chunks the anonymized document produced (count, >= 1)."
+    )
+    prompt_version_hash: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "Content address of the prompt used (§5-P7). Not a foreign key to "
+            "extraction_prompt_version: a prompt is addressable whether or not anyone chose "
+            "to save it to the library, and refusing to record an extraction because its "
+            "prompt was unsaved would discard the observation to protect a join."
+        ),
+    )
+    payload_digest: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "Digest of the anonymized text actually sent — the cache key's document "
+            "component. Proves two extractions read the same text; cannot reconstruct it."
+        ),
+    )
+    model: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="Qualified model identifier, e.g. 'anthropic:claude-3-5-haiku-20241022'.",
+    )
+    raw_response: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="The provider's response text, verbatim and unnormalized (§5-P7).",
+    )
+    output: Mapped[dict[str, object] | None] = mapped_column(
+        # none_as_null: without it SQLAlchemy binds Python None as JSONB `null`,
+        # which is NOT SQL NULL — `output IS NOT NULL` would then be true for a
+        # rejected response and the xor CHECK would reject the row. The same
+        # SQL-NULL-versus-JSON-null trap backend.db.audit warns about, arriving
+        # from the write side. Here SQL NULL is the right storage: "there is no
+        # output" is an absence, not a JSON value.
+        JSONB(none_as_null=True),
+        nullable=True,
+        doc=(
+            "The schema-validated output as JSON, or SQL NULL when validation rejected the "
+            "response. NULL is a recorded outcome, not an omission."
+        ),
+    )
+    validation_errors: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        doc="One line per schema problem, in Pydantic's order; empty array when output is set.",
+    )
+    cache_hit: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        doc="Whether the response came from the cache rather than from a paid call.",
+    )
+    input_tokens: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        doc="Prompt tokens as reported by the provider (count); NULL when it reported none.",
+    )
+    output_tokens: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        doc="Response tokens as reported by the provider (count); NULL when it reported none.",
+    )
+    latency_ms: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 3),
+        nullable=True,
+        doc="Measured wall-clock duration of the call in milliseconds; NULL on a cache hit.",
+    )
+    correlation_id: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="Request id (D-003) the extraction ran under; NULL outside a request.",
+    )
+    extracted_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc=(
+            "When the record was written, UTC, from the database clock at transaction start. "
+            "Ordering key is `result_id`, not this."
         ),
     )

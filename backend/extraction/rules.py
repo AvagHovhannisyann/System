@@ -101,6 +101,13 @@ Deliberately excludes the apostrophe, so ``AdaptHealth's`` masks to
 preserves the sentence.
 """
 
+_MAX_COVERAGE_PASSES: Final = 4
+"""Bound on shadow-resolution sweeps.
+
+A rule that still cannot be placed after this many passes keeps the ordinary
+leftmost-longest result rather than looping.
+"""
+
 PLACEHOLDER_SHAPE: Final = re.compile(r"\[[A-Z][A-Z_]*(?:_\d+)?\]")
 """Shape of a placeholder this module emits, used to detect prior collisions."""
 
@@ -227,6 +234,17 @@ def _candidates(text: str, rules: Sequence[MaskRule]) -> list[tuple[int, int, Ma
     return found
 
 
+def _coverage_key(rule: MaskRule) -> object:
+    """Return what a rule *covers*, for the shadow check in selection.
+
+    Declared entities carry a fixed placeholder and contribute several
+    alternative surface rules (verbatim, core tokens, leading token) — all of
+    them cover the same entity, and exactly one is expected to win. Allocator
+    rules have no fixed placeholder, so each stands for itself.
+    """
+    return rule.placeholder if rule.placeholder is not None else id(rule)
+
+
 def _placeholder_spans(text: str) -> list[tuple[int, int]]:
     """Return the spans of every already-emitted placeholder in ``text``.
 
@@ -269,6 +287,75 @@ def _select(
     return kept
 
 
+def _select_covering_every_entity(
+    candidates: Iterable[tuple[int, int, MaskRule]],
+    protected: Sequence[tuple[int, int]] = (),
+) -> list[tuple[int, int, MaskRule]]:
+    """Select spans, refusing to let one rule's match swallow another rule's only match.
+
+    Leftmost-longest alone can silently drop a declared entity. Company patterns
+    carry an *optional legal tail*, and legal forms include ordinary words like
+    ``Company``, so a declaration of ``Aaab Aaaaa`` matches ``Aaab Aaaaa
+    Company`` — consuming the token that begins a second declared entity
+    ``Company Aaaa``, which is then never masked at all. An unmasked declared
+    entity is precisely the failure this package exists to prevent, and it is
+    invisible: the output looks masked, and the leak detector's own view of what
+    should have been masked came from the same arbitration.
+
+    So: run the ordinary sweep, then look for rules that had candidates but won
+    nothing. For each, drop the *longer* rival spans that shadowed it — only
+    those, and only from other rules — and sweep again. Iteration is bounded;
+    if a rule still cannot be placed, the ordinary result stands rather than
+    looping. Shrinking a rival's span can never manufacture a match that the
+    text does not contain, so this cannot over-mask.
+    """
+    pool = list(candidates)
+    for _ in range(_MAX_COVERAGE_PASSES):
+        selected = _select(pool, protected)
+        # Coverage is per *entity*, not per rule. One entity contributes several
+        # alternative surface rules (verbatim, core tokens, leading token); they
+        # are alternatives, and exactly one is expected to win. Counting them
+        # individually would treat the losing variants as shadowed and keep
+        # dismantling the winner until only the shortest variant survived —
+        # masking "Aaab" and leaving "Aaaaa" of "Aaab Aaaaa" exposed.
+        chosen = {_coverage_key(rule) for _, _, rule in selected}
+        # Only *declared entities* are owed coverage. An allocator rule (dates,
+        # periods) that matches nowhere is an ordinary non-event — it describes a
+        # writing the document simply does not contain — whereas a declared
+        # entity that matches nowhere is an unmasked name. Treating allocator
+        # rules as shadowed would have the loop dismantle legitimate winners to
+        # place patterns nobody claimed were present.
+        shadowed = [
+            c for c in pool if c[2].placeholder is not None and _coverage_key(c[2]) not in chosen
+        ]
+        if not shadowed:
+            return selected
+        # Blockers are identified by (span, rule identity), not by object
+        # identity: _select builds fresh tuples, so a winner is never the same
+        # object as the pool entry it came from.
+        blockers = {
+            (winner[0], winner[1], id(winner[2]))
+            for winner in selected
+            for start, end, rule in shadowed
+            if winner[0] < end
+            and start < winner[1]
+            and id(winner[2]) != id(rule)
+            # Only a strictly longer rival is worth removing; dropping an equal
+            # or shorter one trades one unmasked entity for another.
+            and (winner[1] - winner[0]) > (end - start)
+            # And only when the shadowed span *extends past* the winner. A span
+            # contained within the winner is a competing description of the same
+            # text — "March" inside "March 31, 2024" — and losing is correct.
+            # One that runs past the winner's end is a different entity being
+            # swallowed, which is the case this pass exists for.
+            and end > winner[1]
+        }
+        if not blockers:
+            return selected
+        pool = [c for c in pool if (c[0], c[1], id(c[2])) not in blockers]
+    return _select(pool, protected)
+
+
 def apply_rules(text: str, rules: Sequence[MaskRule]) -> RuleApplication:
     """Apply every rule to ``text`` and return the rewritten document.
 
@@ -284,7 +371,7 @@ def apply_rules(text: str, rules: Sequence[MaskRule]) -> RuleApplication:
         A :class:`RuleApplication` holding the rewritten text, every
         replacement in document order, and one entry per distinct placeholder.
     """
-    selected = _select(_candidates(text, rules), _placeholder_spans(text))
+    selected = _select_covering_every_entity(_candidates(text, rules), _placeholder_spans(text))
 
     buckets: dict[str, _Bucket] = {}
     counters: dict[MaskKind, int] = {}

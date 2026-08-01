@@ -370,16 +370,17 @@ async def test_migration_0008_installs_the_asof_indices() -> None:
     engine = _migration_engine()
     try:
         async with engine.connect() as connection:
-            definitions = dict(
-                (
-                    await connection.execute(
-                        sa.text(
-                            "SELECT indexname, indexdef FROM pg_indexes "
-                            "WHERE tablename IN ('macro_series', 'macro_observation')"
-                        )
+            rows = (
+                await connection.execute(
+                    sa.text(
+                        "SELECT indexname, indexdef FROM pg_indexes "
+                        "WHERE tablename IN ('macro_series', 'macro_observation')"
                     )
-                ).all()
-            )
+                )
+            ).all()
+            # Built explicitly rather than via dict(rows): a Row is a Sequence,
+            # not a 2-tuple, so the pair type is unrecoverable for the checker.
+            definitions: dict[str, str] = {str(name): str(ddl) for name, ddl in rows}
     finally:
         await engine.dispose()
     observation_index = definitions["ix_macro_observation_asof_lookup"]

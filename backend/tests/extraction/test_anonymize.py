@@ -40,3 +40,38 @@ def test_text_arriving_with_placeholders_from_an_earlier_stage_is_untouched() ->
     assert "[COMPANY_7]" in masked.text
     assert "[DATE_2]" in masked.text
     assert "Acme Corp" not in masked.text
+
+
+def test_one_entity_cannot_swallow_the_start_of_another() -> None:
+    """A declared entity must never go unmasked because a neighbour absorbed it.
+
+    Found by Hypothesis. Company patterns carry an *optional legal tail*, and
+    legal forms include ordinary words like ``Company``, so a declaration of
+    ``Aaab Aaaaa`` also matches ``Aaab Aaaaa Company`` — consuming the token
+    that begins a second declared entity ``Company Aaaa``, which was then never
+    masked at all.
+
+    That is the worst failure this package can have and the hardest to notice:
+    the output *looks* masked, and the leak detector's own idea of what should
+    have been masked comes from the same arbitration, so it agrees. The entity
+    simply leaves the building with the document.
+    """
+    masked = anonymize(
+        "Aaab Aaaaa Company Aaaa",
+        [company("Aaab Aaaaa"), company("Company Aaaa")],
+    )
+    assert masked.text == "[COMPANY_1] [COMPANY_2]"
+
+
+def test_a_shorter_competing_description_of_the_same_span_still_loses() -> None:
+    """Coverage must not defeat leftmost-longest where the short match is contained.
+
+    ``March`` inside ``March 31, 2024`` is a competing description of one span,
+    not a second entity, so the long match must still win. Without this
+    distinction the coverage pass would dismantle every legitimate long match to
+    place the short alternative.
+    """
+    masked = anonymize("filed March 31, 2024 by Acme Corp", [company("Acme Corp")])
+    assert "[DATE_1]" in masked.text
+    assert "March" not in masked.text
+    assert "31" not in masked.text
