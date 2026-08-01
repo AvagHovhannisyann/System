@@ -352,3 +352,49 @@ passed while this leak was live; it took nesting depth as a first-class strategy
 dimension to reach the shape. Any future property suite (labels P6.4, optimizer P9.4,
 cost model, backtest engine) must randomize the *structure* of what it exercises, not
 only the values fed through one fixed structure.
+
+## D-019 — API hardening: default-on CSRF, fail-closed rate limiting (CC.2) (2026-08-01)
+
+Landed **before** the first mutating endpoint (P3.10's re-sync trigger), not retrofitted
+onto one. Three choices worth recording, because each has a defensible opposite.
+
+**1. CSRF enforcement is default-on, not opt-in.** A middleware rejects every unsafe
+method unless the path carries an explicit, exact-match exemption (the exemption set is
+currently empty; every future entry must carry a written justification).
+**Reasoning:** a route that forgets an opt-in dependency is *silently unprotected* — the
+failure is invisible until someone exploits it. A route that needs a missing exemption
+fails loudly the first time it runs. Given a choice between a silent security failure
+and a noisy functional one, take the noisy one. Tokens are seeded on any safe-method
+response so there is no token endpoint to forget either.
+**Accepted, consciously:** the CSRF cookie is **not** `HttpOnly`. That is inherent to
+double-submit — the client must read the cookie to populate the header. The token
+authenticates nothing on its own; it only proves same-origin script access. Flagged here
+so it is a deliberate call rather than a discovery.
+**Rejected.** Per-route opt-in dependency (silent-failure mode above); `SameSite` cookies
+alone (no defense-in-depth, and browser-version dependent).
+
+**2. Rate limiting fails CLOSED when Redis is unavailable — 503, not 429.**
+**Reasoning, in the order it actually mattered:** safe methods are exempt, so the entire
+dashboard *read* surface is unaffected by a Redis outage; Redis is already a D-005
+critical component and the Celery broker, so the first consumer of these endpoints could
+not have functioned during that outage anyway; the endpoints being throttled spend real
+money (LLM caps, §6.5) and consume EDGAR fair-access quota, and retry storms happen
+*precisely* during infrastructure failures; and this is a single-operator research tool
+with no availability SLA to weigh against that. 503 rather than 429 because the client
+did nothing wrong — an outage must not be disguised as throttling.
+**Rejected.** Fail-open (accept-and-drop is a *silent* outage, the failure mode this
+project rejects everywhere else); an env var to switch the behavior — `fail_open` exists
+as a constructor argument for tests but deliberately not as configuration, on exactly the
+reasoning D-008 used to reject `continue-on-error`: a safety control that can be turned
+off from the environment will be, at the worst moment.
+**Also:** `X-Forwarded-For` is deliberately not consulted when keying. Without a
+trusted-proxy allowlist it is attacker-controlled and turns the limiter into decoration.
+
+**3. Parameterized-query check tolerates interpolation only under
+`migrations/versions/`, and only for DDL.** Identifiers have no bind-parameter form, and
+revisions run offline with no untrusted input.
+**Rejected.** A per-statement allowlist — it was written first, then replaced: a
+concurrently-landing migration reused the same trigger DDL and would have broken the
+build. An allowlist keyed to specific statements makes correct work fail.
+**Residual risk, stated rather than hidden:** a *new* interpolated DDL shape in a future
+revision passes unreviewed. Documented at the check itself.

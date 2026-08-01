@@ -37,6 +37,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       ENVIRONMENT: ${ENVIRONMENT:-dev}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Required at ENVIRONMENT=prod (hard startup failure without it); at the
+      # dev default an ephemeral key is generated with a warning.
+      CSRF_SECRET: ${CSRF_SECRET:-}
+      SECRETS_KEK: ${SECRETS_KEK:-}
     ports:
       - "8000:8000"
     depends_on:
