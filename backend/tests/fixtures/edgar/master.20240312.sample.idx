@@ -1,0 +1,30 @@
+Description:           Daily Index of EDGAR Dissemination Feed
+Last Data Received:    Mar 12, 2024
+Comments:              webmaster@sec.gov
+Anonymous FTP:         ftp://ftp.sec.gov/edgar/
+ 
+#
+# PROVENANCE (added at capture; not part of the SEC response)
+#   source-url:  https://www.sec.gov/Archives/edgar/daily-index/2024/QTR1/master.20240312.idx
+#   captured-on: 2026-08-01
+#   verbatim:    the preamble/header lines above and the 9 data rows below are
+#                byte-for-byte from that response, which held 5927 data rows covering 3680
+#                distinct accession numbers under 5845 distinct (accession, CIK) pairs.
+#   why:         two 8-K rows so the ingested window spans more than one index date, plus all
+#                seven rows of accession 0001193805-24-000360 - one Form 4 listed under seven
+#                different CIKs (six Deerfield entities and the issuer). 2043 of that day's
+#                3680 accessions are listed under more than one CIK, so this is the ordinary
+#                case, not an oddity: it is why edgar_filing's logical key is
+#                (accession_number, cik) and not the accession alone.
+#
+CIK|Company Name|Form Type|Date Filed|File Name
+--------------------------------------------------------------------------------
+1015739|AWARE INC /MA/|8-K|20240312|edgar/data/1015739/0000950170-24-030003.txt
+1017303|TRANSACT TECHNOLOGIES INC|8-K|20240312|edgar/data/1017303/0001214659-24-004416.txt
+1009258|DEERFIELD MANAGEMENT COMPANY, L.P. (SERIES C)|4|20240312|edgar/data/1009258/0001193805-24-000360.txt
+1010823|Deerfield Mgmt L.P.|4|20240312|edgar/data/1010823/0001193805-24-000360.txt
+1301041|DEERFIELD PARTNERS, L.P.|4|20240312|edgar/data/1301041/0001193805-24-000360.txt
+1352546|Flynn James E|4|20240312|edgar/data/1352546/0001193805-24-000360.txt
+1680307|Deerfield Private Design Fund IV, L.P.|4|20240312|edgar/data/1680307/0001193805-24-000360.txt
+1713467|Deerfield Mgmt IV, L.P.|4|20240312|edgar/data/1713467/0001193805-24-000360.txt
+1725255|AdaptHealth Corp.|4|20240312|edgar/data/1725255/0001193805-24-000360.txt

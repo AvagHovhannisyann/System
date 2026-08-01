@@ -104,12 +104,26 @@ def test_primary_key_is_logical_key_plus_versioning_axes(model: type[BitemporalM
 
 
 def test_registry_contains_exactly_the_bitemporal_mappers() -> None:
-    """The registry the query layer consumes lists every bitemporal mapper, nothing else."""
-    expected: set[type[BitemporalMixin]] = {SecurityMaster, PriceBar}
-    assert set(bitemporal_classes()) == expected
+    """The registry the query layer consumes lists every bitemporal mapper, nothing else.
+
+    The expectation is *derived* from the ORM's own mapper registry rather than
+    frozen as a list of models. A frozen list would say "these two tables
+    exist", which stops being the invariant the moment a phase adds a fact
+    table (P3.2 adds two) — and a registry that silently missed a new mapper is
+    precisely what would let a fact table escape the as-of read enforcement, so
+    the check has to keep biting as tables are added rather than be edited each
+    time.
+    """
+    mapped_bitemporal = {
+        mapper.class_
+        for mapper in Base.registry.mappers
+        if issubclass(mapper.class_, BitemporalMixin)
+    }
+    assert {SecurityMaster, PriceBar} <= mapped_bitemporal
+    assert set(bitemporal_classes()) == mapped_bitemporal
     assert _table(Security).name not in {t.name for t in bitemporal_tables()}
-    assert {m.class_ for m in bitemporal_mappers()} == expected
-    assert bitemporal_tables() == frozenset({_table(SecurityMaster), _table(PriceBar)})
+    assert {m.class_ for m in bitemporal_mappers()} == mapped_bitemporal
+    assert bitemporal_tables() == frozenset(_table(model) for model in mapped_bitemporal)
 
 
 def test_bitemporal_key_declared_per_model() -> None:

@@ -72,10 +72,19 @@ async def _expect_append_only_rejection(statement: str) -> None:
 
 
 async def test_price_bar_is_a_hypertable_and_security_master_is_not() -> None:
+    """The claim in the name, stated per table rather than as a whole-database snapshot.
+
+    Asserting the full list would make this test a census of every hypertable
+    in the schema, which is not what it is about and which a later phase
+    breaks by adding one (P3.2 adds ``edgar_filing``). Each phase's own layout
+    is asserted in that phase's tests.
+    """
     hypertables = await _unguarded_scalar(
         "SELECT array_agg(hypertable_name) FROM timescaledb_information.hypertables"
     )
-    assert hypertables == ["price_bar"]
+    assert isinstance(hypertables, list)
+    assert "price_bar" in hypertables
+    assert "security_master" not in hypertables
 
 
 async def test_hypertable_partitions_on_valid_from_with_one_month_chunks() -> None:

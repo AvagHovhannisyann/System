@@ -1,0 +1,18 @@
+Description:           Daily Index of EDGAR Dissemination Feed
+Last Data Received:    Mar  8, 2024
+Comments:              webmaster@sec.gov
+Anonymous FTP:         ftp://ftp.sec.gov/edgar/
+ 
+#
+# PROVENANCE (added at capture; not part of the SEC response)
+#   source-url:  https://www.sec.gov/Archives/edgar/daily-index/2024/QTR1/master.20240308.idx
+#   captured-on: 2026-08-01
+#   verbatim:    the preamble/header lines above and the 3 data rows below are
+#                byte-for-byte from that response, which held 5804 data rows.
+#   why:         three Form 4 rows only. The connector's default form selection excludes Form 4, so this day exercises an index date on which nothing is selected - which must still advance the checkpoint, or the day would be re-fetched forever.
+#
+CIK|Company Name|Form Type|Date Filed|File Name
+--------------------------------------------------------------------------------
+1000623|Mativ Holdings, Inc.|4|20240308|edgar/data/1000623/0001562180-24-002485.txt
+1001838|SOUTHERN COPPER CORP/|4|20240308|edgar/data/1001838/0001415889-24-007383.txt
+1005210|SUBURBAN PROPANE PARTNERS LP|4|20240308|edgar/data/1005210/0001664272-24-000203.txt
