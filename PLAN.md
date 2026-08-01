@@ -100,7 +100,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | P3.6 | Earnings call transcripts connector | P3.1, B1 | M | BLOCKED(B1) |
 | P3.11 | **Gate G3** prerequisites note: EDGAR (P3.2) is done and gives filings coverage, but G3's snapshot-vs-reference check needs price/fundamental data — still B1-blocked |  | S | BLOCKED(B1) |
 | P3.7 | Borrow availability + rates — **from IBKR in Phase 11, not a data vendor** (operator decision, B1). Rescoped: no vendor connector; the interface is defined here and fed by the Phase 11 adapter | P3.1, B2 | M | BLOCKED(B2) |
-| P3.8 | Macro series connector (FRED — keyless tier available) | P3.1 | M | TODO |
+| P3.8 | Macro series connector (FRED — keyless tier available) | P3.1 | M | DONE (2026-08-01, see PROGRESS) |
 | P3.9 | Data-quality report: per-source coverage, gaps, staleness; persisted per ingestion run | P3.2 | M | DONE |
 | P3.10 | [UI] Data Health page: coverage heatmap, gap list w/ severity, staleness monitor, run history, manual re-sync trigger (rate-limited, CSRF-protected — CC.2) | P3.9, CC.2 | L | TODO |
 | P3.11 | **Gate G3:** fixed-historical-date snapshot vs independently sourced reference within tolerance; delisted names present; DQ report live | P3.3–P3.9 | M | BLOCKED(B1) |
@@ -139,16 +139,16 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P7.1 | Provider registry backend: Fernet-encrypted keys (KEK from env — CC.0), masked display only, no reveal endpoint, test-connection probe; audit-logged config events | G2, CC.0 | L | TODO |
-| P7.2 | Anonymization pipeline: mask company names/tickers/executive names, strip all dates; adversarial test set proving masking on EDGAR text | P3.2 | L | TODO |
-| P7.3 | Extraction task framework: chunking, schema-validated outputs (Pydantic), temperature 0, raw responses stored, prompt version hash on every extraction | P7.2 | L | TODO |
+| P7.1 | Provider registry backend: Fernet-encrypted keys (KEK from env — CC.0), masked display only, no reveal endpoint, test-connection probe; audit-logged config events | G2, CC.0 | L | DONE (2026-08-01, see PROGRESS) |
+| P7.2 | Anonymization pipeline: mask company names/tickers/executive names, strip all dates; adversarial test set proving masking on EDGAR text | P3.2 | L | DONE (2026-08-01, see PROGRESS) |
+| P7.3 | Extraction task framework: chunking, schema-validated outputs (Pydantic), temperature 0, raw responses stored, prompt version hash on every extraction | P7.2 | L | DONE (2026-08-01, see PROGRESS) |
 | P7.4 | Delta-oriented extraction tasks: risk-factor language change, guidance tone vs magnitude, Q&A evasiveness, accounting-language shift, added/removed risk factors | P7.3 | XL (split per-task at start) | TODO |
 | P7.5 | Ensemble: 2–3 cost-tier models, parallel calls, median aggregation, disagreement score, review flag above threshold. **Backfill is pilot-gated: 200 names / 5 years / 2-model ensemble until Phase 8 proves incremental IC over the P5 baseline (D-015)** — the pilot is a ledger row | P7.3, B4 | L | BLOCKED(B4) |
-| P7.6 | Cache keyed `hash(document + prompt_version + model)`; prompt change auto-invalidates affected documents | P7.3 | M | TODO |
+| P7.6 | Cache keyed `hash(document + prompt_version + model)`; prompt change auto-invalidates affected documents | P7.3 | M | DONE (2026-08-01, see PROGRESS) |
 | P7.7 | Cost governor: per-provider daily+monthly caps enforced **before** each call; halt vs degrade-to-cheaper-model behavior; spend tracking | P7.5 | L | TODO |
 | P7.8 | Golden set harness: storage, scoring, per-prompt-version score history, **blind re-label mode** (same document served without prior label, for the intra-rater measurement) and **single-construct-across-all-documents** ordering — never all constructs per document (D-014, B3 protocol). Labels are human — B3 | P7.4 | L | BLOCKED(B3 for labels; harness TODO) |
 | P7.9 | Contamination probe: anonymized-vs-named scoring divergence, threshold, wired into CI as deploy gate | P7.5 | L | TODO |
-| P7.10 | Prompt management: content-addressed versions, history, diff data, golden-score attachment, rollback | P7.3 | L | TODO |
+| P7.10 | Prompt management: content-addressed versions, history, diff data, golden-score attachment, rollback | P7.3 | L | DONE (2026-08-01, see PROGRESS) |
 | P7.11 | [UI] Agents & Extraction page (operator's home — split): registry & key mgmt; per-task model assignment (versioned); prompt history/diff/rollback; ensemble config; cost gauges; quality trends; document inspector (anonymized text sent, raw responses, aggregate, disagreement) | P7.1–P7.10 | XL (split at start) | TODO |
 | P7.12 | **Gate G7:** ≥85% golden agreement; contamination divergence under documented threshold; 1,000-doc re-run within budget; >90% cache hit on repeat | P7.5–P7.10 | M | BLOCKED(B3,B4) |
 
@@ -168,7 +168,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
 | P9.1 | Ledoit-Wolf shrinkage covariance; PSD + shrinkage-intensity property tests | G8 | M | DONE |
-| P9.2 | [ER] cvxpy optimizer: max ER − risk penalty − **explicit turnover penalty**; sector & beta neutrality, 2% position cap, 20% sector cap, full investment; infeasibility diagnosis + documented relaxation ladder | P9.1 | XL (split at start) | TODO |
+| P9.2 | [ER] cvxpy optimizer: max ER − risk penalty − **explicit turnover penalty**; sector & beta neutrality, 2% position cap, 20% sector cap, full investment; infeasibility diagnosis + documented relaxation ladder | P9.1 | XL (split at start) | DONE (2026-08-01, see PROGRESS) |
 | P9.3 | Cost model: half-spread + commission + sqrt-impact (order size / ADV) + borrow on shorts; **units in bps documented on every function**; conservative defaults flagged `UNCALIBRATED` until calibrated from paper fills (P11.8 owns clearing the flag) | G8 | L | DONE |
 | P9.4 | Hypothesis suites: optimizer constraint satisfaction on random inputs; cost-model monotonicity/scaling properties | P9.2, P9.3 | L | TODO |
 | P9.5 | [UI] Portfolio page: current vs target, drift, sector/factor exposures, planned trades w/ est. cost, constraint-binding indicators | P9.2 | L | TODO |
@@ -178,11 +178,11 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P10.1 | [ER] Backtest engine: event-driven daily loop, all reads through `as_of()`, net-of-cost only (I4), artifact stamped with git commit + data version + config hash + seed (I2) | G9 | XL (split at start) | TODO |
+| P10.1 | [ER] Backtest engine: event-driven daily loop, all reads through `as_of()`, net-of-cost only (I4), artifact stamped with git commit + data version + config hash + seed (I2) | G9 | XL (split at start) | DONE (2026-08-01, see PROGRESS) |
 | P10.2 | [ER] CPCV: combinatorial purged splits → **distribution** of OOS Sharpe ratios | P10.1 | L | DONE |
 | P10.3 | [ER] Deflated Sharpe Ratio using full trial count parsed from `TESTING_LEDGER.md` | P10.2 | L | DONE |
 | P10.4 | [ER] Probability of Backtest Overfitting | P10.2 | L | DONE |
-| P10.5 | Walk-forward analysis + buy-and-hold benchmark comparison shown with every result; CIs on every metric; UI contract: no point estimate without interval | P10.1 | L | TODO |
+| P10.5 | Walk-forward analysis + buy-and-hold benchmark comparison shown with every result; CIs on every metric; UI contract: no point estimate without interval | P10.1 | L | DONE (2026-08-01, see PROGRESS) |
 | P10.6 | [ER] **Synthetic-truth harness:** injected signal of known strength recovered; pure noise reports near-zero alpha. The noise test is the critical one | P10.2–P10.5 | L | TODO |
 | P10.7 | [UI] Backtests explorer: equity curve vs benchmark, **CPCV Sharpe histogram with point estimate marked** (the most important visualization in the app), DSR, PBO, drawdowns, turnover, cost waterfall, per-year attribution, run comparison, ledger trial count on every view | P10.5 | XL (split at start) | TODO |
 | P10.8 | **Gate G10:** synthetic-truth harness green both directions, in CI | P10.6 | S | TODO |
