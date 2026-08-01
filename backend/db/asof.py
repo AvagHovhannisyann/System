@@ -49,10 +49,19 @@ Core-level engine guard admits them too.
 
 Below the ORM sits the Core-level engine guard
 (:mod:`backend.db._guard`, installed by :mod:`backend.db.engine` on every
-engine it creates): raw ``Connection`` access and textual SQL that never
-pass through ORM events are rejected there. Executions this hook has
-rewritten are marked with a module-private token in their execution options
-so exactly those pass the Core guard.
+engine it creates), which is **default-deny at the SQL boundary**: the final
+compiled SQL of every execution is name-scanned, and SQL naming a fact table
+runs only if something explicitly sanctioned it. Executions this hook has
+rewritten (or exempted as column loads) are marked with a module-private
+token in their execution options, so exactly those pass; raw ``Connection``
+access and textual SQL that never reach ORM events are refused there.
+
+That inversion is what keeps this module's structural analysis off the
+critical path for invariant I1: a statement shape
+:func:`backend.db._guard.collect_references` fails to see is never
+sanctioned, so it raises at the cursor boundary instead of executing
+unversioned. Rewrite coverage is a usability property here; enforcement is
+the guard's.
 """
 
 from __future__ import annotations
@@ -329,6 +338,11 @@ def _enforce_bitemporal_reads(execute_state: ORMExecuteState) -> None:
       rewriter cannot handle raise :class:`BitemporalRewriteError`
       (fail-closed), verified by re-walking the rewritten statement for
       residual raw references.
+
+    Statements this hook finds clean are returned **unsanctioned** on
+    purpose: the Core guard then judges them on their compiled SQL, so a
+    reference this hook's walker missed is refused rather than executed
+    (:mod:`backend.db._guard`, default-deny).
     """
     if execute_state.is_column_load:
         execute_state.update_execution_options(**sanctioned_execution_options())

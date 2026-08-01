@@ -1,9 +1,10 @@
 """Shared bitemporal read-reference analysis and the Core-level engine guard (D-011).
 
 **Import contract (D-011 bypass-prevention layer 3):** this module is private
-to ``backend/db``. Ruff rule TID251 bans importing it anywhere else in the
-codebase; the only public handle on its behavior is the
-:class:`BitemporalBypassError` re-exported by :mod:`backend.db`.
+to ``backend/db``. Ruff rule TID251 bans importing the private engine module
+anywhere else in the codebase; the only public handle on this module's
+behavior is the :class:`BitemporalBypassError` re-exported by
+:mod:`backend.db`.
 
 Two enforcement surfaces consume this module:
 
@@ -12,27 +13,70 @@ Two enforcement surfaces consume this module:
   find bitemporal fact-table reads in ORM statements before rewriting or
   rejecting them; and
 - the **Core-level engine guard** (:func:`install_core_guard`), registered on
-  every engine :mod:`backend.db.engine` creates (application and admin). It
-  fires on ``before_execute`` (compiled clause elements and ``text()``) and
-  ``before_cursor_execute`` (the final SQL string, catching
-  ``exec_driver_sql`` and any other textual path) and raises
-  :class:`BitemporalBypassError` when the outgoing statement references a
-  bitemporal fact table in a read capacity. Raw ``Connection`` access —
-  ``session.connection()``, the admin engine, hand-built engines are not
-  covered but sessions are — therefore cannot read fact tables unversioned.
+  every engine :mod:`backend.db.engine` creates (application and admin).
 
-Sanctioned executions: the as-of rewrite in :mod:`backend.db.asof` produces
-statements that legitimately reference fact tables (inside the versioned
-subquery form). The rewrite hook marks those executions with a module-private
-**token object** under :data:`SANCTION_EXECUTION_OPTION`
-(:func:`sanctioned_execution_options`); the Core guard admits an execution
-only when the option value ``is`` that exact object. Knowing the option
-*name* is useless — forging admission requires the token object itself, which
-only this banned-outside-``backend/db`` module holds. Similarly, the
-rewriter's own versioned subqueries are marked with a second private token
-via :func:`mark_rewritten_subquery` (an instance attribute, which survives
-SQLAlchemy's clause-adaption cloning) so the reference walker can prune them;
-a user naming a subquery ``_bitemporal_anything`` gets no exemption.
+Enforcement model: **default-deny at the SQL boundary (allowlist).**
+------------------------------------------------------------------
+
+``before_cursor_execute`` — which sees the *final compiled SQL string* of
+every execution, whatever its origin — is the arbiter, and it denies by
+default: a statement whose SQL names a bitemporal fact table executes only
+if something explicitly vetted it and **stamped it sanctioned**. There is no
+statement-type skip: compiled clause elements, ``text()``, ``exec_driver_sql``
+and driver-level paths are all scanned identically.
+
+This inversion is deliberate and load-bearing. The structural walker
+(:func:`collect_references`) is a heuristic over SQLAlchemy clause trees; a
+shape it cannot see would previously have produced a *silent unversioned
+read*, because the string scan was skipped for anything compiled from a
+clause element. Under default-deny a walker blind spot produces a loud
+:class:`BitemporalBypassError` instead: the walker's completeness is no
+longer the property I1 rests on.
+
+Two independent channels carry a sanction, both keyed on module-private
+token objects compared by identity — knowing a name or a key is useless,
+forging admission requires the token itself:
+
+1. **Execution options** (:data:`SANCTION_EXECUTION_OPTION` /
+   :func:`sanctioned_execution_options`), set by the ORM hook in
+   :mod:`backend.db.asof` on statements it has itself rewritten to the
+   versioned form, and on ORM column loads it exempts. These reach
+   ``context.execution_options`` because the ORM passes them as the
+   caller-supplied execution options of the execution.
+2. **A per-connection pre-compilation grant** (:func:`_grant_core_sanction`),
+   issued by ``before_execute`` for the one Core-level shape that must reach
+   Postgres naming a fact table without being a read: **plain DML whose
+   target is a fact table and which embeds no fact-table read** — the
+   ingestion writer's ``INSERT ... VALUES``, and the ``UPDATE``/``DELETE``
+   that must reach the append-only database triggers to be refused there.
+   The grant names the exact table(s) it covers and is matched against the
+   execution by object identity, so it admits nothing else.
+
+   *Why a connection grant and not ``before_execute(..., retval=True)``:* on
+   the installed SQLAlchemy (2.0.x) ``Connection._execute_clauseelement``
+   merges the execution options **before** dispatching ``before_execute``
+   and passes that pre-computed mapping to the execution context, so an
+   element returned from the event with new ``execution_options`` never
+   reaches ``context.execution_options``. Verified empirically against the
+   installed version rather than assumed. The grant is written to
+   ``conn.info`` immediately before the statement compiles, revoked at the
+   start of every ``before_execute``, and admits an execution only when
+   ``context.invoked_statement`` (or ``context.compiled``) *is* the exact
+   object that was vetted — so it cannot outlive or widen beyond its
+   statement.
+
+Deliberately **not** stamped, so that the SQL scan still judges them:
+
+- **Selects the walker found clean.** Stamping those would reintroduce the
+  very blind spot this design removes — a walker that sees nothing would
+  hand out a pass. Their SQL simply must not name a fact table, which is
+  what "clean" means, verified on the string rather than on the walker.
+- **DDL.** ``ExecutableDDLElement`` includes :class:`sqlalchemy.schema.DDL`,
+  which carries arbitrary SQL text; blanket-stamping DDL would reopen an
+  arbitrary-read path through the public ``create_admin_engine``. DDL that
+  names a fact table therefore fails closed on guarded engines — which costs
+  nothing, because every sanctioned fact-table DDL (alembic migrations) runs
+  on the unguarded module-private migration engine (D-012).
 
 Textual SQL cannot be structurally analyzed, so it is name-scanned: a
 conservative case-insensitive word-boundary regex over the SQL string
@@ -41,7 +85,16 @@ conservative case-insensitive word-boundary regex over the SQL string
 ``TRUNCATE price_bar``) raises :class:`BitemporalBypassError` even though no
 versioned read occurs. That is acceptable: the failure mode is a loud error,
 never a leak, and sanctioned infrastructure work (migrations, test resets)
-runs on the unguarded module-private migration engine instead.
+runs on the unguarded module-private migration engine instead. Under
+default-deny that same conservatism now applies to compiled statements too:
+an inline literal spelling a fact-table name inside a Core select is
+refused.
+
+The rewriter's own versioned subqueries are marked with a second private
+token via :func:`mark_rewritten_subquery` (an instance attribute, which
+survives SQLAlchemy's clause-adaption cloning) so the reference walker can
+prune them; a user naming a subquery ``_bitemporal_anything`` gets no
+exemption.
 """
 
 from __future__ import annotations
@@ -100,9 +153,18 @@ grants nothing — membership is checked with ``is``.
 _SUBQUERY_SANCTION_TOKEN: Final[object] = object()
 """Unforgeable marker for subqueries built by the as-of rewriter itself."""
 
+_CORE_SANCTION_INFO_KEY: Final = "_bitemporal_core_sanction"
+"""``Connection.info`` key carrying the pre-compilation grant for one statement.
+
+The carrier for Core-level sanctions, used because SQLAlchemy merges an
+execution's options *before* dispatching ``before_execute`` (module
+docstring). Like the option key above, the name is not a secret: the grant is
+a :class:`_CoreSanction` whose token is checked with ``is``.
+"""
+
 
 class BitemporalBypassError(RuntimeError):
-    """A statement referenced a bitemporal fact table in a read capacity, unversioned.
+    """A statement would have reached a bitemporal fact table unsanctioned.
 
     D-011 bypass prevention. Raised before any row leaves the database, by
     either enforcement surface:
@@ -110,10 +172,13 @@ class BitemporalBypassError(RuntimeError):
     - the class-level ORM ``do_orm_execute`` hook (:mod:`backend.db.asof`) —
       for any :class:`sqlalchemy.orm.Session` in the process whose SELECT (or
       DML-embedded read) touches a fact table with no bound as-of; and
-    - the Core-level engine guard (:func:`install_core_guard`) — for compiled
-      Core statements and textual SQL on every engine ``backend.db`` creates,
-      catching ``session.connection()``, the admin engine, and
-      ``exec_driver_sql``.
+    - the Core-level engine guard (:func:`install_core_guard`) on every engine
+      ``backend.db`` creates, catching ``session.connection()``, the admin
+      engine and ``exec_driver_sql``. Its ``before_execute`` half raises on a
+      *detected* unversioned reference; its ``before_cursor_execute`` half
+      raises on the **final SQL string** of any execution that names a fact
+      table without carrying a sanction — the default-deny rule that makes a
+      structural blind spot loud rather than silent (module docstring).
 
     The message names the offending table(s) and the sanctioned read path
     (``backend.db.as_of``).
@@ -165,6 +230,67 @@ def sanctioned_execution_options() -> dict[str, object]:
 def _is_sanctioned_execution(execution_options: Mapping[str, Any]) -> bool:
     """True when the options carry the exact module-private sanction token."""
     return execution_options.get(SANCTION_EXECUTION_OPTION) is _EXECUTION_SANCTION_TOKEN
+
+
+class _CoreSanction(NamedTuple):
+    """One pre-compilation grant issued by ``before_execute`` for one statement.
+
+    - ``token``: the module-private sanction object, compared by identity, so
+      a grant written into ``conn.info`` by anything but this module is inert;
+    - ``statement``: the exact object handed to ``before_execute``; the grant
+      applies only to an execution whose ``context.invoked_statement`` (or
+      ``context.compiled``, for the pre-built-``Compiled`` path) *is* it;
+    - ``tables``: the fact-table names the grant covers. The cursor guard
+      admits the execution only when every fact-table name found in the final
+      SQL is in this set, so a grant for ``INSERT INTO price_bar`` cannot
+      launder a statement that also names another fact table.
+    """
+
+    token: object
+    statement: object
+    tables: frozenset[str]
+
+
+def _grant_core_sanction(conn: Connection, statement: object, tables: frozenset[str]) -> None:
+    """Record that ``statement`` was vetted and may name ``tables`` in its SQL.
+
+    Written to ``conn.info`` (per DBAPI connection; executions on a connection
+    are strictly sequential) immediately before the statement is compiled and
+    executed, because SQLAlchemy computes an execution's options before
+    dispatching ``before_execute`` — see the module docstring.
+    """
+    conn.info[_CORE_SANCTION_INFO_KEY] = _CoreSanction(_EXECUTION_SANCTION_TOKEN, statement, tables)
+
+
+def _revoke_core_sanction(conn: Connection) -> None:
+    """Drop any outstanding grant on ``conn``.
+
+    Called at the top of every ``before_execute`` so a grant can never
+    outlive the statement it was issued for, even if compilation raises
+    between the two events.
+    """
+    conn.info.pop(_CORE_SANCTION_INFO_KEY, None)
+
+
+def _core_sanctioned_tables(conn: Connection, context: ExecutionContext | None) -> frozenset[str]:
+    """Return the fact tables ``context``'s execution was granted, else empty.
+
+    Identity-matched against the grant's statement object, so a stale or
+    forged entry admits nothing: ``exec_driver_sql`` (no ``compiled``, no
+    ``invoked_statement``) and any other statement never match.
+    """
+    granted = conn.info.get(_CORE_SANCTION_INFO_KEY)
+    if (
+        context is None
+        or not isinstance(granted, _CoreSanction)
+        or granted.token is not _EXECUTION_SANCTION_TOKEN
+    ):
+        return frozenset()
+    if getattr(context, "invoked_statement", None) is granted.statement:
+        return granted.tables
+    if getattr(context, "compiled", None) is granted.statement:
+        return granted.tables
+    return frozenset()
 
 
 def mark_rewritten_subquery(subquery: Subquery) -> Subquery:
@@ -312,6 +438,24 @@ def _raise_textual(mentioned: frozenset[str]) -> None:
     raise BitemporalBypassError(msg)
 
 
+def _raise_unsanctioned_sql(tables: frozenset[str]) -> None:
+    """Raise the default-deny rejection for unsanctioned SQL naming fact tables."""
+    msg = (
+        f"unsanctioned SQL naming bitemporal fact table(s) {', '.join(sorted(tables))} "
+        "reached the driver: executions are denied at the SQL boundary unless "
+        "something explicitly vetted and sanctioned them (the as_of() rewrite, an "
+        "ORM column load, or a plain fact-table write vetted at before_execute). "
+        "A structural blind spot therefore fails loudly instead of reading "
+        "unversioned. This is a conservative word-boundary name scan over the "
+        "final compiled SQL, so false positives (a string or column literal "
+        "spelling a fact-table name, TRUNCATE of a fact table, DDL naming one) "
+        "are accepted by design. Reads go through backend.db.as_of() (D-011/I1); "
+        "sanctioned infrastructure work (migrations, test reset) uses the private "
+        "migration engine inside backend/db"
+    )
+    raise BitemporalBypassError(msg)
+
+
 def _raise_structural(tables: frozenset[str], capacity: str) -> None:
     """Raise the Core-guard rejection for a compiled statement reading fact tables."""
     msg = (
@@ -327,20 +471,37 @@ def _raise_structural(tables: frozenset[str], capacity: str) -> None:
 # fixed signature — every parameter must be accepted whether or not the guard
 # reads it. Renaming or dropping one silently breaks listener registration.
 def _core_before_execute(
-    conn: Connection,  # noqa: ARG001
+    conn: Connection,
     clauseelement: Executable,
     multiparams: Sequence[Mapping[str, Any]],  # noqa: ARG001
     params: Mapping[str, Any],  # noqa: ARG001
     execution_options: Mapping[str, Any],
 ) -> None:
-    """``before_execute`` guard: vet every compiled/textual statement pre-compilation.
+    """``before_execute`` guard: vet each statement, and sanction the writes.
 
-    Admits executions sanctioned by the as-of rewrite (module-private token in
-    ``execution_options``), plain DDL (not a read; sanctioned DDL runs on the
-    unguarded migration engine anyway), and DML whose only fact-table
-    reference is its own write target. Everything else touching a fact table
-    raises :class:`BitemporalBypassError` before any I/O.
+    Runs before compilation, so detected violations raise at the most
+    informative point (no I/O, full clause tree in hand). It is *not* the
+    arbiter: :func:`_core_before_cursor_execute` denies by default on the
+    final SQL, and this hook's job is to hand out the narrow positive
+    sanction that lets legitimate writes through it.
+
+    Per statement kind:
+
+    - already sanctioned by the as-of rewrite / ORM column load: nothing to
+      do (the token travels in ``execution_options``);
+    - ``text()``: name-scanned and rejected on match, fail-closed;
+    - DDL: vetted no further and **not** sanctioned — see the module
+      docstring (``sqlalchemy.schema.DDL`` carries arbitrary SQL);
+    - DML: an embedded fact-table read raises; otherwise, if the target is
+      itself a fact table, the execution is **granted** a sanction naming
+      exactly that table, which is what lets the ingestion writer's
+      ``INSERT ... VALUES`` reach Postgres and lets ``UPDATE``/``DELETE``
+      reach the append-only triggers that refuse them;
+    - anything else (selects): a detected fact-table reference raises, and a
+      clean statement is deliberately **not** sanctioned, so its final SQL is
+      still scanned.
     """
+    _revoke_core_sanction(conn)
     if _is_sanctioned_execution(execution_options):
         return
     table_names = fact_table_names()
@@ -363,6 +524,9 @@ def _core_before_execute(
         refs = collect_dml_read_references(element, table_names)
         if refs:
             _raise_structural(refs.all_tables(), "DML-embedded read")
+        target = element.table
+        if isinstance(target, TableClause) and target.name in table_names:
+            _grant_core_sanction(conn, clauseelement, frozenset({target.name}))
         return
     refs = collect_references(element, table_names)
     if refs:
@@ -370,40 +534,47 @@ def _core_before_execute(
 
 
 def _core_before_cursor_execute(
-    conn: Connection,  # noqa: ARG001
+    conn: Connection,
     cursor: DBAPICursor,  # noqa: ARG001
     statement: str,
     parameters: object,  # noqa: ARG001
     context: ExecutionContext | None,
     executemany: bool,  # noqa: ARG001
 ) -> None:
-    """``before_cursor_execute`` guard: name-scan the final SQL string.
+    """``before_cursor_execute`` guard: the default-deny arbiter on the final SQL.
 
-    Second net for textual paths: catches ``exec_driver_sql`` (which never
-    fires ``before_execute``) and re-checks ``text()`` statements. Statements
-    compiled from clause elements were already structurally vetted (or
-    sanctioned) in ``before_execute`` and are skipped — the structural check
-    is strictly stronger than a string scan.
+    Every execution reaching the driver is name-scanned, with **no
+    statement-type skip**: compiled clause elements, ``text()``,
+    ``exec_driver_sql`` and driver-level paths alike. SQL naming a bitemporal
+    fact table executes only when the execution carries a module-private
+    sanction — the as-of rewrite / ORM column-load token in its execution
+    options, or a ``before_execute`` grant that names the very tables found.
+    Everything else raises :class:`BitemporalBypassError`.
+
+    This is what makes the structural walker non-load-bearing: a clause shape
+    :func:`collect_references` cannot see is never sanctioned, so it is
+    refused here on the strength of the SQL text alone instead of executing
+    unversioned.
     """
     if context is not None and _is_sanctioned_execution(context.execution_options):
         return
-    compiled = getattr(context, "compiled", None)
-    source = getattr(compiled, "statement", None)
-    if source is not None and not isinstance(source, TextClause):
-        return
     mentioned = scan_sql_text(statement, fact_table_names())
-    if mentioned:
-        _raise_textual(mentioned)
+    if not mentioned:
+        return
+    if not mentioned - _core_sanctioned_tables(conn, context):
+        return
+    _raise_unsanctioned_sql(mentioned)
 
 
 def install_core_guard(engine: Engine) -> None:
     """Register the Core-level bitemporal read guard on a (sync) engine.
 
     Called by :mod:`backend.db.engine` for every engine it creates — the
-    process-wide application engine and every admin engine. The only engine
-    deliberately created *without* the guard is the module-private migration
-    engine (alembic runs, sanctioned test/db reset), which is not importable
-    outside ``backend/db``.
+    process-wide application engine and every admin engine. Both halves are
+    required: ``before_execute`` vets and sanctions, ``before_cursor_execute``
+    denies by default on the final SQL. The only engine deliberately created
+    *without* the guard is the module-private migration engine (alembic runs,
+    sanctioned test/db reset), which is not importable outside ``backend/db``.
     """
     event.listen(engine, "before_execute", _core_before_execute)
     event.listen(engine, "before_cursor_execute", _core_before_cursor_execute)

@@ -14,13 +14,16 @@ the class-level ``do_orm_execute`` hook (layer 2).
 
 Every engine this module creates — the process-wide application engine and
 every admin engine — carries the **Core-level bitemporal read guard**
-(:func:`backend.db._guard.install_core_guard`): compiled Core selects and
-textual SQL referencing a bitemporal fact table raise
-:class:`~backend.db._guard.BitemporalBypassError` at the engine, so raw
-``Connection`` access (``session.connection()``, the admin engine,
-``exec_driver_sql``) cannot read fact tables unversioned. The single
-deliberate exception is :func:`_create_migration_engine` — module-private,
-for alembic runs and the sanctioned test/db reset, where DDL like
+(:func:`backend.db._guard.install_core_guard`), which is default-deny: the
+final SQL of every execution is name-scanned, and SQL naming a bitemporal
+fact table raises :class:`~backend.db._guard.BitemporalBypassError` unless
+the execution was explicitly vetted and sanctioned (the as-of rewrite, an
+ORM column load, or a plain fact-table write). Raw ``Connection`` access
+(``session.connection()``, the admin engine, ``exec_driver_sql``) therefore
+cannot read fact tables unversioned, and neither can a statement shape the
+structural walker fails to recognize. The single deliberate exception is
+:func:`_create_migration_engine` — module-private, for alembic runs and the
+sanctioned test/db reset, where DDL like
 ``create_hypertable('price_bar', ...)`` and ``TRUNCATE`` must execute.
 """
 
@@ -123,9 +126,9 @@ def create_admin_engine(settings: Settings | None = None) -> AsyncEngine:
     code that must talk to the server but never reads fact rows. This is
     *not* a data read path, and the restriction is **enforced**, not merely
     documented: the Core-level guard is installed on the returned engine, so
-    any compiled or textual statement referencing a bitemporal fact table in
-    a read capacity (including a fail-closed name-scan of raw SQL, and
-    ``TRUNCATE`` of fact tables) raises
+    any statement whose SQL names a bitemporal fact table without an explicit
+    sanction (compiled or textual alike — including ``TRUNCATE`` and DDL
+    naming fact tables, which belong on the migration engine) raises
     :class:`~backend.db._guard.BitemporalBypassError` before any I/O. The
     caller owns the engine lifecycle (``await engine.dispose()``). When
     ``settings`` is omitted the cached application settings are used.
