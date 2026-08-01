@@ -12,7 +12,7 @@ from functools import lru_cache
 from importlib import metadata
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DISTRIBUTION_NAME = "quant-research-platform"
@@ -52,6 +52,26 @@ class Settings(BaseSettings):
     environment: Literal["dev", "test", "prod"] = "dev"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     app_version: str = Field(default_factory=_package_version)
+
+    sec_user_agent: str | None = None
+    """Contact string sent as ``User-Agent`` to SEC EDGAR.
+
+    SEC's fair-access policy requires every automated requester to identify
+    itself with contact information. There is deliberately **no default**:
+    the EDGAR connector refuses to run when this is unset rather than
+    sending an anonymous or invented identifier (policy compliance is
+    fail-closed, and a fabricated contact would be worse than none).
+    """
+
+    secrets_kek: SecretStr | None = None
+    """Key-encryption key (Fernet, urlsafe-base64 32 bytes) from the environment.
+
+    Wraps provider API keys at rest (§7, I5). Sourced **only** from the
+    environment — never from the database, never committed — so a database
+    dump alone cannot decrypt stored credentials. ``SecretStr`` so the value
+    cannot leak through ``repr``/logs. Components needing it raise when it is
+    unset rather than falling back to an unencrypted path.
+    """
 
     @field_validator("log_level", mode="before")
     @classmethod
