@@ -1,0 +1,42 @@
+{
+ "_provenance": {
+  "origin": "constructed",
+  "constructed_at": "2026-08-01",
+  "warning": "NOT CAPTURED FROM FRED. NOT A REAL SERIES DEFINITION. The units string says so in its own text so that a value read out of this fixture cannot be mistaken for a measurement.",
+  "schema_reference": "https://fred.stlouisfed.org/docs/api/fred/series.html",
+  "schema_fidelity": "Field names and the 'seriess' envelope follow the documented fred/series JSON response, whose published example (series_id=GNPCA) carries exactly: id, realtime_start, realtime_end, title, observation_start, observation_end, frequency, frequency_short, units, units_short, seasonal_adjustment, seasonal_adjustment_short, last_updated, popularity, notes. The fields this connector does not read are omitted rather than invented — notably last_updated, which is deliberately NOT used as a knowledge time (it describes the series as a whole, not any single revision; see backend/ingest/fred/parse.py).",
+  "scenario": "Two metadata versions, so series definitions are proven to version through the same real-time periods observations do."
+ },
+ "realtime_start": "1776-07-04",
+ "realtime_end": "9999-12-31",
+ "seriess": [
+  {
+   "id": "REVISEDTWICE",
+   "realtime_start": "2024-04-25",
+   "realtime_end": "2024-06-26",
+   "title": "Constructed Revision Test Series",
+   "observation_start": "2024-01-01",
+   "observation_end": "2024-01-01",
+   "frequency": "Quarterly",
+   "frequency_short": "Q",
+   "units": "Constructed Test Units (not an economic measure)",
+   "units_short": "Constructed",
+   "seasonal_adjustment": "Not Seasonally Adjusted",
+   "seasonal_adjustment_short": "NSA"
+  },
+  {
+   "id": "REVISEDTWICE",
+   "realtime_start": "2024-06-27",
+   "realtime_end": "9999-12-31",
+   "title": "Constructed Revision Test Series (Renamed)",
+   "observation_start": "2024-01-01",
+   "observation_end": "2024-04-01",
+   "frequency": "Quarterly",
+   "frequency_short": "Q",
+   "units": "Constructed Test Units (not an economic measure)",
+   "units_short": "Constructed",
+   "seasonal_adjustment": "Not Seasonally Adjusted",
+   "seasonal_adjustment_short": "NSA"
+  }
+ ]
+}

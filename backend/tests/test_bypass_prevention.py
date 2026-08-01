@@ -187,6 +187,14 @@ _SANCTIONED_PRIVATE_ENGINE_USERS = frozenset(
         # Postgres directly. Routed through a guarded engine, these tests would
         # only re-assert the app guard and leave the triggers unverified.
         "backend/tests/integration/test_hypertable_append_only.py",
+        # P3.8 FRED vintage tests: same two sanctioned reasons. The per-test
+        # reset TRUNCATEs fact tables (textual SQL naming them, which the Core
+        # guard refuses by design), and the vintage assertions must read the
+        # RAW stored rows — knowledge_time and vintage_start_date as persisted.
+        # Reading those through as_of() would show the versioned view, which is
+        # the very thing under test: whether a revision was stored as a
+        # later-knowledge row rather than an overwrite.
+        "backend/tests/integration/test_fred_ingestion.py",
         # P3.2 EDGAR fact tables: same two reasons as the two entries above, for
         # the tables migration 0006 adds. Its append-only triggers and hypertable
         # layout must be checked beneath the guard, and the module resets its own

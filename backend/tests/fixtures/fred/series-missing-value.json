@@ -1,0 +1,28 @@
+{
+ "_provenance": {
+  "origin": "constructed",
+  "constructed_at": "2026-08-01",
+  "warning": "NOT CAPTURED FROM FRED. NOT A REAL SERIES DEFINITION.",
+  "schema_reference": "https://fred.stlouisfed.org/docs/api/fred/series.html",
+  "schema_fidelity": "See series-revised-twice.json.",
+  "scenario": "A single metadata version, paired with observations-missing-value.json."
+ },
+ "realtime_start": "1776-07-04",
+ "realtime_end": "9999-12-31",
+ "seriess": [
+  {
+   "id": "WITHMISSING",
+   "realtime_start": "2024-02-15",
+   "realtime_end": "9999-12-31",
+   "title": "Constructed Missing-Value Test Series",
+   "observation_start": "2024-01-01",
+   "observation_end": "2024-01-03",
+   "frequency": "Daily",
+   "frequency_short": "D",
+   "units": "Constructed Test Units (not an economic measure)",
+   "units_short": "Constructed",
+   "seasonal_adjustment": "Not Seasonally Adjusted",
+   "seasonal_adjustment_short": "NSA"
+  }
+ ]
+}

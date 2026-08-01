@@ -1,0 +1,54 @@
+{
+ "_provenance": {
+  "origin": "constructed",
+  "constructed_at": "2026-08-01",
+  "warning": "NOT CAPTURED FROM FRED. NOT ECONOMIC DATA. Do not read any number here as a measurement of anything. The values 1.1 / 2.2 / 3.3 / 4.4 were chosen precisely because no real macro series looks like that.",
+  "why_not_captured": "P3.8 was built with no FRED API key provisioned. Every FRED endpoint requires a key (verified live on 2026-08-01: a keyless GET of fred/series/observations answers HTTP 400 'Variable api_key is not set'), so no real multi-vintage response could be recorded. Rather than invent a payload and let it pass as real, this file is labelled as constructed and its only job is to exercise temporal logic.",
+  "schema_reference": [
+   "https://fred.stlouisfed.org/docs/api/fred/series_observations.html",
+   "https://fred.stlouisfed.org/docs/api/fred/realtime_period.html",
+   "https://alfred.stlouisfed.org/help/downloaddata"
+  ],
+  "schema_fidelity": "Envelope and row shape follow the documented fred/series/observations JSON response for output_type=1 ('Observations by Real-Time Period'). Per ALFRED's Download Data Help: realtime_start is 'the first vintage date for which a data value is the latest revision available' and realtime_end 'the last'. The real-time periods below are contiguous and non-overlapping per observation date, which is what that definition requires.",
+  "scenario": "Observation date 2024-01-01 is revised twice (three vintages); observation date 2024-04-01 has a single vintage released later. This is the revision case the whole connector exists to get right: an as_of before a revision must return the superseded value.",
+  "captured_counterpart": "observations-gnpca-docs-example.json is genuinely published FRED output and pins the same envelope."
+ },
+ "realtime_start": "1776-07-04",
+ "realtime_end": "9999-12-31",
+ "observation_start": "1776-07-04",
+ "observation_end": "9999-12-31",
+ "units": "lin",
+ "output_type": 1,
+ "file_type": "json",
+ "order_by": "observation_date",
+ "sort_order": "asc",
+ "count": 4,
+ "offset": 0,
+ "limit": 100000,
+ "observations": [
+  {
+   "realtime_start": "2024-04-25",
+   "realtime_end": "2024-05-29",
+   "date": "2024-01-01",
+   "value": "1.1"
+  },
+  {
+   "realtime_start": "2024-05-30",
+   "realtime_end": "2024-06-26",
+   "date": "2024-01-01",
+   "value": "2.2"
+  },
+  {
+   "realtime_start": "2024-06-27",
+   "realtime_end": "9999-12-31",
+   "date": "2024-01-01",
+   "value": "3.3"
+  },
+  {
+   "realtime_start": "2024-07-25",
+   "realtime_end": "9999-12-31",
+   "date": "2024-04-01",
+   "value": "4.4"
+  }
+ ]
+}
