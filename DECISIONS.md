@@ -398,3 +398,87 @@ concurrently-landing migration reused the same trigger DDL and would have broken
 build. An allowlist keyed to specific statements makes correct work fail.
 **Residual risk, stated rather than hidden:** a *new* interpolated DDL shape in a future
 revision passes unreviewed. Documented at the check itself.
+
+## D-020 — Covariance refuses rather than invents; cost defaults document their error direction (P9) (2026-08-01)
+
+**1. Ledoit-Wolf raises below three observations instead of flooring the intensity.**
+At `n = 2` the analytic shrinkage intensity is identically zero for *every* panel at every
+width — demeaning makes the two rows exact negatives, so the error term the estimator
+measures vanishes by construction (verified numerically for p ∈ {1,2,5,50}; scikit-learn
+agrees, its unclamped value even going slightly negative). This is a degeneracy of the
+formula, not of the data.
+**Rejected — flooring the intensity:** it would report a shrinkage this code *invented*
+rather than derived (forbidden behavior #2), and the intensity is precisely the number
+that tells an operator how much of the risk model is assumption rather than data.
+Corrupting it to avoid an error message trades a loud failure for a quiet lie.
+**Rejected — warning and continuing:** the consumer is an optimizer, which answers a
+near-singular covariance with an unbounded position along the null space. A warning in a
+log does not stop that.
+**Hole this closed:** the draft relied on a downstream singularity error firing
+incidentally, but at `n_assets == 1` a two-observation panel is invertible — so nothing
+raised and the caller silently received an unshrunk estimate reporting `intensity = 0.0`.
+**Explicitly not claimed:** the minimum of 3 is where the *formula* stops being valid, not
+where a risk model becomes trustworthy. The real minimum (60? 252?) is a policy that
+belongs upstream where it is visible — logged as an open item.
+
+**2. Constant panels are detected against the demeaning noise floor, not against zero.**
+Demeaning a constant panel leaves residue around `eps · level` (~1e-38), never exact zero,
+so a `<= 0.0` guard never fires and the panel falls through to a misleading singularity
+error.
+
+**3. A short position must state its holding period.** A short with no holding period
+silently paid zero borrow. The draft documented that as deliberate; it is an
+understatement of the short book in exactly the direction D-013 forbids. Intraday is out
+of scope (§1.1), so a zero-day short is always a caller error and is now refused.
+
+**4. Cost defaults are documented by the DIRECTION of their error, not presented as
+accurate.** Flat half-spread overcharges megacaps roughly fivefold (conservative — it can
+kill a viable large-cap strategy but cannot flatter a bad one); commission understates
+low-priced names as bps rises when price falls; borrow understates hard-to-borrow names by
+one to two orders of magnitude until per-name borrow data arrives from Phase 11 (B2).
+Every result carries `uncalibrated=True` and a calibration basis so a backtest can declare
+what its numbers rest on — G9 requires that flag be visible, not merely present.
+
+## D-021 — Validation-framework decisions and two metric defects (P10) (2026-08-01)
+
+**Trial count is a required argument.** `deflated_sharpe_ratio` refuses to default
+`trials` or `trial_sharpe_variance`, pinned by a signature-introspection test that fails
+if either ever acquires a default or becomes positional. An empty `TESTING_LEDGER.md`
+yields zero trials and the DSR **refuses** rather than rounding to one. Reason: a DSR
+computed as though one thing was tried when two hundred were is the single most
+misleading number this system could emit (§9.7).
+
+**Two defects found by the new tests, both silent:**
+- `kurtosis` computed `m4 / variance**2`. For deviations near 1e-100 the squared variance
+  underflows to exactly zero, so it raised *after* the zero-variance guard had already
+  passed. Found by Hypothesis. Replaced with a scale-free formulation (rescale deviations
+  onto [-1,1] before taking powers) — mathematically identical, immune to underflow and
+  overflow.
+- `sharpe_ratio` returned a silent `0.0` when the variance overflowed (`mean / inf`). It
+  now refuses. A zero Sharpe reads as "no edge"; the truth was "this number is unusable".
+
+**Kurtosis floor tolerance.** The guard `kurtosis < 1.0` rejected the *attainable*
+minimum — a two-point symmetric series evaluates to 0.9999999999999999. Relaxed by 1e-9.
+The mix-up the guard exists to catch (excess vs non-excess kurtosis) is off by ~3, so the
+tolerance cannot mask it.
+
+**Deferred, deliberately.** DSR assumes `N` independent trials; a ledger of near-duplicate
+perturbations over-deflates. That is the conservative direction and is documented, but a
+narrowly-rejected strategy deserves a look at trial correlation before it is discarded.
+`deflated_sharpe_ratio_from_trials` cannot yet read trial Sharpes from the ledger — there
+is no structured column, and the reader refuses to mine free text for one, because
+guessing a grammar would silently understate the variance that makes deflation work.
+Until P8.4 emits a structured trial Sharpe, callers supply that variance from elsewhere.
+
+## D-022 — A broken CI workflow reports nothing, so its validity is now tested (2026-08-01)
+
+**What happened.** A step name containing a colon-space (`I3: no mock…`) parses as a
+nested YAML mapping. GitHub rejected the workflow before starting any job, reporting the
+run as *failure with zero jobs* — which in the commit view looks like a build that has not
+started rather than one that failed. It went unnoticed for fifteen commits, during which
+CI results were reported as green when no workflow had run at all.
+**Decision.** A test parses every workflow file and asserts it declares jobs with steps.
+**Reasoning.** The failure is invisible exactly where people look for it, and no amount of
+care while editing fixes a mode that produces no signal. The local gate (full suite, ruff,
+`mypy --strict`) was run before each of those commits, so nothing shipped untested — but
+"CI is green" was not a true statement, and the fix is a check rather than more diligence.
