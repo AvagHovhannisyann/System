@@ -93,14 +93,15 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
 | P3.1 | Connector framework: base class (retry, rate-limit, incremental checkpoint, DQ metrics emission), Celery + beat wiring, ingestion-run tracking table marking each run `backfill\|live` with a DQ check flagging live runs whose knowledge_times trail ingestion beyond the source's declared lag (D-011 compensating control), rejection/flagging of future `knowledge_time` at write, and the **open-interval supersession contract**: a connector closing an open-ended fact writes a later-knowledge correction row with the same `valid_from` and a bounded `valid_to` (audit finding — until written, consecutive open intervals overlap) | G2 | L | DONE |
-| P3.2 | SEC EDGAR connector — **the reference implementation of the P3.1 contracts** (operator direction): filings index + documents, **acceptance timestamps from the daily index files** as `knowledge_time`, incremental sync. Chosen first because it needs no key (B1-independent), because acceptance timestamps are the hardest temporal-correctness problem in Phase 3 — exercising the bitemporal layer against a real adversarial case rather than a synthetic one — and because it is the Phase 7 input anyway. Sharadar drops in behind the same interface once B1 clears | P3.1 | L | TODO |
+| P3.2 | SEC EDGAR connector — **the reference implementation of the P3.1 contracts** (operator direction): filings index + documents, **acceptance timestamps from the daily index files** as `knowledge_time`, incremental sync. Chosen first because it needs no key (B1-independent), because acceptance timestamps are the hardest temporal-correctness problem in Phase 3 — exercising the bitemporal layer against a real adversarial case rather than a synthetic one — and because it is the Phase 7 input anyway. Sharadar drops in behind the same interface once B1 clears | P3.1 | L | DONE |
 | P3.3 | Corporate actions connector (splits, dividends, delistings, ticker changes, M&A) — **must include delisted securities** | P3.1, B1 | L | BLOCKED(B1) |
 | P3.4 | Daily OHLCV connector with full adjustment history (raw + adjustment factors stored separately) | P3.1, B1 | L | BLOCKED(B1) |
 | P3.5 | Point-in-time fundamentals connector: unrestated, original report dates → `knowledge_time` | P3.1, B1 | L | BLOCKED(B1) |
 | P3.6 | Earnings call transcripts connector | P3.1, B1 | M | BLOCKED(B1) |
+| P3.11 | **Gate G3** prerequisites note: EDGAR (P3.2) is done and gives filings coverage, but G3's snapshot-vs-reference check needs price/fundamental data — still B1-blocked |  | S | BLOCKED(B1) |
 | P3.7 | Borrow availability + rates — **from IBKR in Phase 11, not a data vendor** (operator decision, B1). Rescoped: no vendor connector; the interface is defined here and fed by the Phase 11 adapter | P3.1, B2 | M | BLOCKED(B2) |
 | P3.8 | Macro series connector (FRED — keyless tier available) | P3.1 | M | TODO |
-| P3.9 | Data-quality report: per-source coverage, gaps, staleness; persisted per ingestion run | P3.2 | M | TODO |
+| P3.9 | Data-quality report: per-source coverage, gaps, staleness; persisted per ingestion run | P3.2 | M | DONE |
 | P3.10 | [UI] Data Health page: coverage heatmap, gap list w/ severity, staleness monitor, run history, manual re-sync trigger (rate-limited, CSRF-protected — CC.2) | P3.9, CC.2 | L | TODO |
 | P3.11 | **Gate G3:** fixed-historical-date snapshot vs independently sourced reference within tolerance; delisted names present; DQ report live | P3.3–P3.9 | M | BLOCKED(B1) |
 
@@ -214,9 +215,9 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 
 | ID | Task | After | Cx | Status |
 |---|---|---|---|---|
-| CC.0 | Crypto foundation: Fernet key encryption, KEK from env, log-redaction processor for key patterns (structlog processor + tests) | G1 | M | TODO |
+| CC.0 | Crypto foundation: Fernet key encryption, KEK from env, log-redaction processor for key patterns (structlog processor + tests) | G1 | M | DONE |
 | CC.1 | Immutable audit log + config-as-events: append-only table (who, when, field, old, new), every config write goes through it; versioned-config helper reused by features/extraction/settings | G2 | L | TODO |
-| CC.2 | API hardening **before** the first mutating endpoint ships: CSRF protection, rate limiting on mutating routes, parameterized-queries-only lint check. P3.10's re-sync trigger is the first consumer and depends on this | P3.1 | M | TODO |
+| CC.2 | API hardening **before** the first mutating endpoint ships: CSRF protection, rate limiting on mutating routes, parameterized-queries-only lint check. P3.10's re-sync trigger is the first consumer and depends on this | P3.1 | M | DONE |
 | CC.3 | MLflow service in compose + DVC init (data versioning for I2) | G2 | M | TODO |
 | CC.4 | [UI] Settings & Audit page: config viewer, scheduler management, backup status, immutable audit trail browser | CC.1 | L | TODO |
 | CC.5 | Playwright e2e harness + first critical-path test (loads dashboard, health visible); grows with each [UI] task | G1 | M | DONE |

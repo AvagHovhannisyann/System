@@ -113,3 +113,20 @@ configured caps.
 ---
 
 *Resolved blockers move to a "Resolved" section below with resolution notes — never deleted.*
+
+## B5 — CORRESP/UPLOAD knowledge-time policy — OPEN (2026-08-01)
+
+**Blocks:** ingesting SEC correspondence forms (`CORRESP`, `UPLOAD`). Not in the
+connector's default form selection, so nothing else is blocked today.
+**The problem, found empirically during P3.2:** accession `0000950170-24-012183` was
+**accepted 2024-02-07** but only **disseminated in the 2024-03-11 index**. For these
+forms acceptance is therefore *earlier* than knowability — using the acceptance
+timestamp as `knowledge_time` would be **anti-conservative**, making the filing appear
+knowable roughly a month before the market could see it. That is a lookahead bug of
+exactly the kind I1 exists to prevent, and it is invisible unless someone looks.
+**Not resolved in code.** The connector measures the divergence instead of guessing at
+it (`filings_accepted_before_index_date`, `max_acceptance_to_index_lag` in the DQ
+report), so the size of the effect is observable before a policy is chosen.
+**Needed from the human:** a policy decision before these forms are ingested — most
+likely `knowledge_time = dissemination/index date` for correspondence forms, but that
+should be a deliberate choice recorded in `DECISIONS.md`, not a silent default.
