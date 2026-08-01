@@ -130,3 +130,23 @@ report), so the size of the effect is observable before a policy is chosen.
 **Needed from the human:** a policy decision before these forms are ingested — most
 likely `knowledge_time = dissemination/index date` for correspondence forms, but that
 should be a deliberate choice recorded in `DECISIONS.md`, not a silent default.
+
+## B6 — Dashboard UI design is routed away from this agent — OPEN (2026-08-01)
+
+**Blocks:** every `[UI]` task — P3.10, **P4.3**, **P5.5**, P7.11, P8.5, P10.7, P11.6,
+P12.5, CC.4. Nine pages; only the Overview page exists.
+**Why this is a blocker and not a task:** the project instructions in `CLAUDE.md` route
+all website/UI/UX design — layout, visual wireframes, mockups, styling — to **Fabel**,
+and forbid this agent from attempting them. That is a standing routing rule, not a
+capacity limit, so no amount of build time here clears it.
+**Consequence for the phase gates.** Two gates name a UI artefact in their binary
+condition: **G4** requires size/turnover history *rendered and manually inspected*, and
+**G5** requires the correlation matrix reviewed. The backend data those pages consume is
+being built now (P4.2 supplies the waterfall and size/turnover series; P5.3/P5.4 supply
+the correlation and premia data), so the gates are reachable the moment the pages exist.
+Until then G4 and G5 can only be *partially* evidenced — the programmatic half (tests,
+computed series) passes; the human-inspection half cannot be signed off. **Neither gate
+may be marked GATE-PASSED on the backend half alone** (directive §9.10).
+**Needed from the human:** hand the nine `[UI]` tasks to Fabel, or explicitly re-scope
+the two gates' inspection clauses. The backend exposes the data through the API either
+way, so the two tracks are independent and can proceed in parallel.
