@@ -622,7 +622,14 @@ async def test_the_append_only_triggers_are_all_still_installed(
     )
     assert len(rows) >= 10, f"only {len(rows)} append-only triggers are installed"
     for row in rows:
-        assert row.enabled == "O", (
+        # pg_trigger.tgenabled is PostgreSQL's internal "char" type, which asyncpg
+        # hands back as a one-byte `bytes`, not `str`. Normalised rather than
+        # compared to b"O", because the driver is free to change that mapping and
+        # the property under test is the trigger's mode, not its transport type.
+        # This is the whole substance of the only failure CI found in CC.9:
+        # `assert b'O' == 'O'` — the triggers were correctly enabled all along.
+        enabled = row.enabled.decode() if isinstance(row.enabled, bytes) else row.enabled
+        assert enabled == "O", (
             f"{row.trigger_name} on {row.table_name} has tgenabled={row.enabled!r}; "
             "'O' is the only value that fires on ordinary (origin) sessions"
         )
