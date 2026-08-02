@@ -22,6 +22,12 @@ are drawn:
   that matters most for this component — whatever comes back, it is never a
   quietly relaxed portfolio. Either it is the requested constraint set, or it
   says what it loosened, or it refuses.
+- **infeasible at a known rung**: universes built so that arithmetic alone fixes
+  which rung of :data:`~backend.portfolio.constraints.RELAXATION_LADDER` must
+  rescue them. These are what turn "it reported *a* relaxation" into "it
+  reported *exactly* the relaxation the ladder declares, and loosened nothing
+  else" — the failure mode being a constraint that moves without appearing in
+  the report.
 """
 
 from __future__ import annotations
@@ -44,6 +50,7 @@ from backend.portfolio.constraints import (
     DEFAULT_CONSTRAINTS,
     RELAXATION_LADDER,
     PortfolioConstraints,
+    RelaxableConstraint,
 )
 from backend.portfolio.covariance import ShrinkageCovariance, ledoit_wolf_covariance
 from backend.portfolio.optimizer import (
@@ -153,6 +160,75 @@ def _check_constraints(
         abs(float(betas @ weights) - result.target_beta)
         <= constraints.beta_neutrality_band + CONSTRAINT_TOLERANCE
     )
+
+
+_RELAXED_FIELD: dict[RelaxableConstraint, str] = {
+    RelaxableConstraint.SECTOR_NEUTRALITY: "sector_neutrality_band",
+    RelaxableConstraint.BETA_NEUTRALITY: "beta_neutrality_band",
+    RelaxableConstraint.SECTOR_CAP: "sector_cap",
+    RelaxableConstraint.FULL_INVESTMENT: "net_exposure",
+}
+"""The field of :class:`PortfolioConstraints` each ladder rung is allowed to move.
+
+Written out here rather than imported so the test states the mapping
+independently of the code under test. If the optimizer ever loosens a limit that
+is not the one its rung names, this table is what catches it.
+"""
+
+
+def _assert_only_the_prefix_moved(result: OptimizationResult) -> None:
+    """Exactly the constraints the report names were loosened, and no others.
+
+    "It relaxed something and told me" is a weaker claim than the one the ladder
+    makes. The claim is that rung *k* loosens the first *k* entries of
+    :data:`RELAXATION_LADDER`, in the direction that entry loosens, and leaves
+    every other limit at the value that was requested. A constraint that moved
+    without appearing in the report is indistinguishable downstream from one
+    that never moved — which is the whole failure mode this suite exists for.
+    """
+    requested = result.requested_constraints
+    used = result.constraints
+
+    # Neither of the two unrelaxable limits ever moves, at any rung.
+    assert used.position_cap == requested.position_cap
+    assert used.gross_exposure == requested.gross_exposure
+
+    for index, constraint in enumerate(RELAXATION_LADDER):
+        field = _RELAXED_FIELD[constraint]
+        used_value = float(getattr(used, field))
+        requested_value = float(getattr(requested, field))
+        if index >= result.rung:
+            assert used_value == requested_value, (constraint, used_value, requested_value)
+        elif constraint is RelaxableConstraint.FULL_INVESTMENT:
+            # The one rung that loosens downward: it deploys less capital.
+            assert used_value <= requested_value, (constraint, used_value, requested_value)
+        else:
+            assert used_value >= requested_value, (constraint, used_value, requested_value)
+
+
+def _assert_the_ladder_was_climbed_in_order(result: OptimizationResult) -> None:
+    """Every rung below the one that solved was actually tried, and actually failed.
+
+    Without this, a result at rung 3 is only a claim that three constraints were
+    loosened; with it, it is a claim that rungs 0, 1 and 2 were each put to a
+    solver and each came back with a definite non-answer. That is the difference
+    between a reported relaxation and a justified one.
+    """
+    attempts = result.attempts
+    assert [attempt.rung for attempt in attempts] == list(range(result.rung + 1))
+    for attempt in attempts:
+        assert attempt.relaxations == RELAXATION_LADDER[: attempt.rung]
+    for attempt in attempts[:-1]:
+        assert attempt.status == "infeasible" or attempt.status.startswith(
+            ("not_applicable", "refused")
+        ), attempt.describe()
+    assert attempts[-1].rung == result.rung
+    assert attempts[-1].status == "optimal"
+    assert result.status == "optimal"
+    assert (tuple(item.constraint for item in result.relaxations)) == RELAXATION_LADDER[
+        : result.rung
+    ]
+    assert all(item.realized is not None for item in result.relaxations)
 
 
 @given(problem=_problems(feasible=True), risk_aversion=st.floats(min_value=0.0, max_value=50.0))
@@ -272,14 +348,14 @@ def test_a_relaxed_portfolio_is_never_returned_silently(
     assert result.constraints.position_cap == DEFAULT_CONSTRAINTS.position_cap
     assert result.constraints.gross_exposure == DEFAULT_CONSTRAINTS.gross_exposure
 
+    # Whatever rung it came from: only the constraints it named were loosened,
+    # and every rung beneath the one that solved was tried and refused first.
+    _assert_only_the_prefix_moved(result)
+    _assert_the_ladder_was_climbed_in_order(result)
+
     if result.is_relaxed:
         assert result.rung > 0
-        assert (
-            tuple(item.constraint for item in result.relaxations)
-            == RELAXATION_LADDER[: result.rung]
-        )
         assert result.constraints != result.requested_constraints
-        assert all(item.realized is not None for item in result.relaxations)
         assert result.summary()["is_relaxed"] is True
     else:
         assert result.rung == 0

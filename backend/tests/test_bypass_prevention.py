@@ -9,6 +9,7 @@ a real database lives in ``backend/tests/integration/``.
 
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import subprocess
 import sys
@@ -212,19 +213,103 @@ silent exception.
 """
 
 
+def _docstring_constants(tree: ast.Module) -> frozenset[int]:
+    """Identify the string nodes that are docstrings rather than executable values."""
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        first = node.body[0] if node.body else None
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            docstrings.add(id(first.value))
+    return frozenset(docstrings)
+
+
+def _private_engine_references(source: str) -> list[str]:
+    """Return every way ``source`` reaches the private engine module, in code.
+
+    Covers the three routes that actually grant a handle — ``import x``,
+    ``from x import y``, and a string literal fed to a dynamic importer — and
+    deliberately excludes docstrings and comments, which are prose *about* the
+    ban rather than a use of it.
+    """
+    tree = ast.parse(source)
+    docstrings = _docstring_constants(tree)
+    references: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            references += [
+                f"import {alias.name}"
+                for alias in node.names
+                if alias.name == _BANNED_MODULE or alias.name.startswith(f"{_BANNED_MODULE}.")
+            ]
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == _BANNED_MODULE or module.startswith(f"{_BANNED_MODULE}."):
+                references.append(f"from {module} import ...")
+            elif module == "backend.db":
+                references += [
+                    f"from backend.db import {alias.name}"
+                    for alias in node.names
+                    if alias.name == _BANNED_MODULE.rsplit(".", 1)[1]
+                ]
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+            and _BANNED_MODULE in node.value
+        ):
+            references.append(f"string literal {node.value!r}")
+    return references
+
+
 def test_no_source_outside_db_layer_imports_engine_internals() -> None:
-    """Belt-and-braces source scan: the private module name appears nowhere unsanctioned."""
-    offenders: list[str] = []
+    """Belt-and-braces source scan: nothing unsanctioned *reaches* the private engine.
+
+    Parsed rather than grepped. The substring scan this replaces could not tell
+    an import from a sentence, so a module that merely *documented* the ban —
+    ``backend/features/compute.py`` explaining why it accepts a pinned session
+    and constructs no engine — was reported as a violation. The failure mode
+    that matters is the inverse: a scan people learn to placate by rewording
+    comments is one they will eventually placate by rewording the wrong thing.
+
+    Parsing loses nothing. Dynamic access still needs the module's name as a
+    *string value*, and string constants are checked; only docstrings and
+    comments, which cannot import anything, are exempt.
+    """
+    offenders: dict[str, list[str]] = {}
     for path in sorted((_REPO_ROOT / "backend").rglob("*.py")):
         relative = path.relative_to(_REPO_ROOT)
         if relative.parts[:2] == ("backend", "db"):
             continue
         if relative.as_posix() in _SANCTIONED_PRIVATE_ENGINE_USERS:
             continue
-        content = path.read_text()
-        if _BANNED_MODULE in content or _BANNED_FROM_IMPORT in content:
-            offenders.append(str(relative))
-    assert offenders == []
+        found = _private_engine_references(path.read_text())
+        if found:
+            offenders[relative.as_posix()] = found
+    assert offenders == {}
+
+
+def test_the_source_scan_catches_every_route_to_the_private_engine() -> None:
+    """Non-vacuity: each reachable form is detected, and prose about it is not.
+
+    Without this, replacing the grep with a parser could quietly have replaced a
+    noisy check with a silent one.
+    """
+    assert _private_engine_references(f"import {_BANNED_MODULE}")
+    assert _private_engine_references(f"import {_BANNED_MODULE} as e")
+    assert _private_engine_references(f"from {_BANNED_MODULE} import create_admin_engine")
+    assert _private_engine_references(_BANNED_FROM_IMPORT)
+    assert _private_engine_references(f'importlib.import_module("{_BANNED_MODULE}")')
+    assert _private_engine_references(f'x = "{_BANNED_MODULE}"')
+
+    assert not _private_engine_references(f'"""Prose naming {_BANNED_MODULE} in a docstring."""')
+    assert not _private_engine_references(f"# a comment naming {_BANNED_MODULE}\nx = 1")
+    assert not _private_engine_references("from backend.db import as_of, ingest_writer_session")
 
 
 def test_sanctioned_private_engine_allowlist_has_no_stale_entries() -> None:

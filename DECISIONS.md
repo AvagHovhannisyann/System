@@ -584,3 +584,30 @@ and the cheapest response — re-run until green — would have preserved a test
 not distinguish "tampering is refused" from "tampering is accepted" in one case in sixteen.
 An intermittently-failing assertion is a claim about the system that is *sometimes false*;
 it deserves the same investigation as a hard failure, and I3/I6 forbid the re-run.
+
+## D-025 — The private-engine source scan parses instead of greps (2026-08-02)
+
+**Trigger.** `test_no_source_outside_db_layer_imports_engine_internals` failed against
+`backend/features/compute.py`, which had *documented* the D-011 ban in its module
+docstring — explaining that it accepts a session already scoped by `as_of()` and is given
+no way to build an engine. The scan was a substring search over file text, so prose about
+the rule read identically to a violation of it.
+
+**Decision.** The scan now parses each file and reports three routes that actually grant a
+handle: `import <engine>`, `from <engine> import ...` / `from backend.db import engine`,
+and the module's name appearing as a **string constant** (the dynamic-import route).
+Docstrings and comments are exempt; nothing else is.
+
+**Why this is not a weakening.** Dynamic access still needs the module name as a string
+*value*, and string constants are still checked — only docstrings and comments, which
+cannot import anything, are skipped. A companion test asserts every one of the six
+reachable forms is still caught and that the three prose forms are not, so replacing a
+noisy check with a silent one would fail immediately.
+
+**The reason it was worth changing rather than rewording one docstring.** A scan that
+cannot distinguish a sentence from an import teaches authors to placate it by editing
+prose. The existing file already carried the scar — its own constants are split across a
+string concatenation with a comment telling future editors to *keep the literal out of
+comments*. That workaround is a smell, not a solution: the next author writes the
+docstring, watches a security test go red, and learns that the way to satisfy the security
+test is to stop describing the security property.
