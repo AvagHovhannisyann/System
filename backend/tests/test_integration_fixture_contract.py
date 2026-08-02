@@ -26,6 +26,10 @@ import ast
 from pathlib import Path
 from typing import Final
 
+import backend.db.models  # noqa: F401 — populates the metadata the reset is derived from
+from backend.db.base import Base
+from backend.tests.integration.conftest import _truncate_every_table
+
 _CONFTEST: Final = (
     Path(__file__).resolve().parents[2] / "backend" / "tests" / "integration" / "conftest.py"
 )
@@ -80,6 +84,37 @@ def test_the_engine_is_disposed_before_each_integration_test_not_only_after() ->
         f"{_FIXTURE_NAME} must still call {_DISPOSE}() after yielding, so the next "
         "test's event loop cannot inherit pooled connections bound to a dead loop"
     )
+
+
+def test_the_reset_names_every_mapped_table_and_never_alembic_version() -> None:
+    """The per-test TRUNCATE must be derived from the metadata, not a literal list.
+
+    The literal it replaced named four tables and had gone fourteen behind. That
+    is silent until a table holds state a later test reads unconditionally —
+    orders hid it (every test mints a fresh idempotency key, so leftovers are
+    unreachable) while halts did not, because a halt is *global* by design. The
+    first real run of the halt log failed eleven tests, each seeing every halt
+    its predecessors engaged.
+
+    Asserted here rather than left to the fixture, because the fixture only runs
+    where a Docker daemon exists — which is precisely not where a new table gets
+    added and forgotten.
+    """
+    statement = _truncate_every_table()
+    named = {
+        part.strip()
+        for part in statement.split("TRUNCATE TABLE ")[1].split(" RESTART")[0].split(",")
+    }
+
+    assert named == set(Base.metadata.tables), (
+        "the reset must name exactly the mapped tables; a table missing here is "
+        "never cleaned between integration tests"
+    )
+    assert "alembic_version" not in named, (
+        "truncating alembic_version would discard the migration state the session "
+        "depends on — it is safe only because it is not in Base.metadata"
+    )
+    assert "RESTART IDENTITY CASCADE" in statement
 
 
 def test_this_contract_test_can_actually_fail() -> None:
