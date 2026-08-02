@@ -406,9 +406,19 @@ async def test_concurrent_appends_of_one_event_leave_one_transition() -> None:
     assert len(written) + len(refused) == CONCURRENT_WRITERS, outcomes
     assert len(written) == 1
     assert len(refused) == CONCURRENT_WRITERS - 1
-    # At least one loser must reach the database, or this test has stopped
-    # exercising the constraint it exists for and become a state-machine test.
-    assert lost_at_the_database, outcomes
+    # Deliberately NOT asserted here: that any particular loser reached the
+    # database. An earlier version of this test did assert that, and it failed on
+    # the very next CI run with all five losers refused in Python — after its own
+    # docstring had said which mechanism catches a writer is a scheduling
+    # accident. Asserting on the accident makes this test flaky, and a flaky test
+    # in a suite that treats flakes as findings costs more than it proves.
+    #
+    # The database path is covered deterministically instead, without a race, by
+    # test_the_chain_guard_refuses_a_taken_position_as_a_unique_violation and
+    # test_the_chain_guard_refuses_a_gap_in_the_sequence below. That is where
+    # "the constraint really fires" belongs; what *this* test uniquely proves is
+    # that under genuine contention exactly one writer wins and every other is
+    # refused by some path the design has named.
     async with ingest_writer_session() as session:
         loaded = await load_order(session, order_id)
     assert loaded.sequence_number == 1
