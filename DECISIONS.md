@@ -1000,3 +1000,40 @@ requires one. By contrast `fill_payload_present` *is* reachable — not via `fil
 (a NULL quantity cannot move the running sum, while `filled` demands a full trade) but via
 `partial_fill`, which carries no completeness requirement. The claim was kept and the input
 corrected, rather than the claim weakened to fit the first input tried.
+
+## D-035 — The coverage ratchet, and what it is not evidence of (CC.6, 2026-08-02)
+
+**The number was wrong before it was a floor.** The backend measured "~97%" only because
+`backend/tests` sat in the denominator — rows that are ~100% covered by construction. On
+the same data, tests-in-denominator reads 93.86% against 88.20% shipped-only: a **4.21-point
+pad**. Tests are now omitted, which *lowers* the reported figure and points the gate at the
+code §8 is about. A coverage number that flatters itself is worse than none, because it is
+quoted.
+
+**Two holes in the mechanism, both silent.**
+- `precision` defaults to **0**, and coverage compares `round(total, precision) <
+  fail_under`. A real **84.6% rounds to 85 and clears an 85 floor.** Set to 2.
+- Vitest's `thresholds.autoUpdate` rewrites the floor to the last run's number. Now
+  explicitly `false` **and asserted**, so it is not available to reach for the next time the
+  gate fails — which is exactly when someone would.
+
+**The floor is a committed constant, pinned in two files.** Raising it is a visible
+two-file diff; lowering it quietly is impossible. The frontend stays at **70** rather than
+today's 85.96, because pinning to the current number ratifies a lucky run and punishes every
+commit after it. An auto-ratchet is not a ratchet — it is a record of the best weather.
+
+**What this gate does not prove, documented at the config sites and asserted by test** so
+the caveat cannot be deleted from the thing it describes: not that anything was *asserted*
+(an import with no assertions moves the number); not that assertions are about outcomes; not
+that the uncovered residue is random — the cheapest way to lift a ratio is to test easy
+code, so the remainder drifts toward the error paths; not comparable across commits, since
+deleting untested code raises it. **Every property this project actually rests on — I1
+temporal integrity, the append-only triggers, no-alpha-on-pure-noise — is asserted directly,
+and not one of them would be caught by this gate.** It is a decay alarm, not a quality
+measure, and it is written down that way so a future reader does not mistake 88% for a
+statement about correctness.
+
+**`# pragma: no cover` is budgeted at 9 with zero headroom**, each required to carry a
+reason. The next one added fails loudly and explains itself. Two existing pragmas in
+`backend/portfolio/optimizer.py` say only "defensive" and are too thin — flagged for that
+file's owner rather than edited.
