@@ -98,9 +98,26 @@ async def _clean_database(
 ) -> AsyncIterator[None]:
     """Give every integration test a migrated, empty database and a fresh engine.
 
-    Teardown truncates all fact tables (restarting identities), then disposes
-    the process-wide engine so the next test's event loop cannot inherit
-    pooled connections bound to a dead loop.
+    Setup disposes the process-wide engine *before* handing over, and teardown
+    truncates all fact tables (restarting identities) before disposing it again.
+
+    **The setup-side disposal is not symmetry, it is the fix for a real bug.**
+    ``_get_engine`` caches one engine per process, built from
+    ``get_settings().database_url`` the first time anything asks for it.
+    Disposing only on teardown leaves the *first* integration test of a session
+    inheriting whatever engine an earlier, non-integration test happened to
+    build — and that one was built before ``migrated_database_url`` pointed
+    ``DATABASE_URL`` at the container, so it addresses the default
+    ``localhost:5432`` where nothing is listening.
+
+    This is not hypothetical. It surfaced the moment P5.1 added
+    ``backend/tests/features/test_compute_lag.py``, which calls ``as_of()`` and
+    sorts before ``backend/tests/integration/``: CI began erroring in exactly
+    one place, ``test_asof_bind_integrity.py`` — the alphabetically first
+    integration module, and so the only one not already handed a fresh engine
+    by a previous test's teardown. Every later test passed, which is precisely
+    what made it read like flaky infrastructure rather than an ordering
+    dependency.
 
     The reset runs on the module-private *migration* engine, not the admin
     engine: the Core guard blocks textual SQL naming a fact table on every
@@ -110,6 +127,7 @@ async def _clean_database(
     dynamic import the migration environment uses — importing it statically
     would (correctly) trip the TID251 import contract.
     """
+    await dispose_database()
     yield
     from backend.db.engine import _create_migration_engine  # noqa: TID251 — see docstring
 
