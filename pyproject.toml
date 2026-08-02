@@ -41,6 +41,7 @@ dev = [
     "celery-types>=0.22",
     "pandas-stubs>=2.2",
     "types-PyYAML>=6.0",
+    "dvc>=3.67",           # tooling: data versioning for I2 (CC.3); no backend module imports it
 ]
 
 [build-system]
