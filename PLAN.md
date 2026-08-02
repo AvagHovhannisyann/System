@@ -118,9 +118,9 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P5.1 | Feature framework: declaration schema (name, definition, **units**, availability lag, source tables), registry with **hard 30-feature cap** (enforced in code + test), lag enforcement in the compute path | G4 | L | WIP — modules committed untested; test suite in progress |
-| P5.2 | Transform pipeline: winsorize 1/99 → cross-sectional z-score → sector neutralize → optional beta neutralize; property-tested (idempotence, NaN policy, no cross-date leakage) | P5.1 | L | WIP — modules committed untested; test suite in progress |
-| P5.3 | Baseline factors: momentum 12-1, book-to-price, earnings yield, gross profitability, ROIC, accruals, asset growth, low volatility, size, short interest, Amihud illiquidity — each with docstring stating units + assumptions | P5.1, P5.2 | XL (split per-factor at start) | WIP — in progress |
+| P5.1 | Feature framework: declaration schema (name, definition, **units**, availability lag, source tables), registry with **hard 30-feature cap** (enforced in code + test), lag enforcement in the compute path | G4 | L | DONE (2026-08-02) — 137 tests, 16/16 mutations killed, 3 defects fixed |
+| P5.2 | Transform pipeline: winsorize 1/99 → cross-sectional z-score → sector neutralize → optional beta neutralize; property-tested (idempotence, NaN policy, no cross-date leakage) | P5.1 | L | DONE (2026-08-02) — 134 tests, 19/19 mutations killed, 6 defects fixed, see D-028 |
+| P5.3 | Baseline factors: momentum 12-1, book-to-price, earnings yield, gross profitability, ROIC, accruals, asset growth, low volatility, size, short interest, Amihud illiquidity — each with docstring stating units + assumptions | P5.1, P5.2 | XL (split per-factor at start) | WIP — 9 of 11 factors (166 tests, 22/22 mutations); size, short interest, Amihud unwritten; 6 refuse on B1, see D-027 |
 | P5.4 | Factor premia validation harness: long-sample sign + magnitude check per factor vs published stylized facts | P5.3 | L | TODO |
 | P5.5 | [UI] Features page: catalog (definitions, lags, coverage), correlation heatmap, rolling IC, distributions, enable/disable toggles writing versioned config (CC.1 events, never mutating a live model) | P5.3 | L | TODO |
 | P5.6 | **Gate G5:** premia reproduce; correlation matrix reviewed (notes to `PROGRESS.md`); lookahead test per feature | P5.4 | M | TODO |
@@ -170,7 +170,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | P9.1 | Ledoit-Wolf shrinkage covariance; PSD + shrinkage-intensity property tests | G8 | M | DONE |
 | P9.2 | [ER] cvxpy optimizer: max ER − risk penalty − **explicit turnover penalty**; sector & beta neutrality, 2% position cap, 20% sector cap, full investment; infeasibility diagnosis + documented relaxation ladder | P9.1 | XL (split at start) | DONE (2026-08-01, see PROGRESS) |
 | P9.3 | Cost model: half-spread + commission + sqrt-impact (order size / ADV) + borrow on shorts; **units in bps documented on every function**; conservative defaults flagged `UNCALIBRATED` until calibrated from paper fills (P11.8 owns clearing the flag) | G8 | L | DONE |
-| P9.4 | Hypothesis suites: optimizer constraint satisfaction on random inputs; cost-model monotonicity/scaling properties | P9.2, P9.3 | L | WIP — suites green (45 tests); found 2 defects, see D-025 |
+| P9.4 | Hypothesis suites: optimizer constraint satisfaction on random inputs; cost-model monotonicity/scaling properties | P9.2, P9.3 | L | DONE (2026-08-02) — 45 tests; found the cost float-resolution and bypass-scan defects |
 | P9.5 | [UI] Portfolio page: current vs target, drift, sector/factor exposures, planned trades w/ est. cost, constraint-binding indicators | P9.2 | L | TODO |
 | P9.6 | **Gate G9:** optimizer solves across historical dates; turnover-penalty A/B in backtest shows reduced realized turnover; uncalibrated-cost flag visible | P9.4 | M | TODO |
 
