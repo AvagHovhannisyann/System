@@ -395,7 +395,7 @@ def cross_sectional_zscore(values: npt.NDArray[np.float64]) -> npt.NDArray[np.fl
         return np.full(array.shape, np.nan, dtype=np.float64)
 
     mean = float(np.mean(observed))
-    standard_deviation = float(np.std(observed, ddof=0))
+    standard_deviation = float(np.std(observed, ddof=1))
     scale = float(np.max(np.abs(observed)))
     if not statistics_are_representable(mean, standard_deviation, scale):
         return np.full(array.shape, np.nan, dtype=np.float64)
