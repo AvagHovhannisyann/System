@@ -611,3 +611,34 @@ string concatenation with a comment telling future editors to *keep the literal 
 comments*. That workaround is a smell, not a solution: the next author writes the
 docstring, watches a security test go red, and learns that the way to satisfy the security
 test is to stop describing the security property.
+
+## D-026 — Phase 4 universe construction: four conventions and one consequence (2026-08-02)
+
+**The consequence first, because it is the load-bearing part.** `UniverseCriteria` makes a
+strictly positive market-cap floor **mandatory**, and no shares-outstanding source exists
+(B1). So **every `build_universe` call refuses today**, before it reads anything, with
+`UniverseInputUnavailableError(blocker="B1")`. Phase 4 is built and tested; it cannot
+produce a universe until the fundamentals connector lands. That is the I3-correct
+behaviour and it is stated here so nobody reads "P4.1 DONE" as "we can build universes".
+The borrow screen refuses on B2 the same way.
+
+**Turnover is normalised by the sum of both sides' counts**: `(entered + exited) /
+(prev_count + count)`, a fraction in [0, 1]. The obvious alternative — divide by the later
+count — reports turnover above 1 whenever the universe shrinks, which is precisely when a
+reader is most likely to be looking at it. At constant size the two agree, so the
+convention costs nothing and removes a nonsense reading.
+
+**The ADV window is a calendar span (1.5x + 10 days), not an exchange calendar**, because
+no trading calendar exists yet. A window holding fewer bars than required yields
+`adv = None` — the name is refused, not estimated from a shorter window. Estimating would
+let a name enter the universe on the strength of three quiet days.
+
+**`delisted_on == D` means still listed on D** (the delisting date is the last tradeable
+day). Arbitrary but it must be written down: the survivorship-bias test turns on this
+comparison, and an off-by-one here silently drops every name on its final day.
+
+**The waterfall attributes each exclusion once, to the earliest screen in `FILTER_ORDER`.**
+A name failing three screens is not counted three times, so `sum(removed) + members ==
+candidates` holds exactly. This is why `FILTER_ORDER` is part of the criteria hash —
+reordering the screens does not change *who* is in the universe but does change the
+waterfall, and an artefact whose numbers move without a hash change is unreproducible (I2).

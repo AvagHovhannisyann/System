@@ -41,6 +41,7 @@ from backend.db import as_of, create_admin_engine, ingest_writer_session
 from backend.db.models import PriceBar, Security, SecurityMaster
 from backend.universe import builder
 from backend.universe.builder import (
+    adv_window_start,
     assemble_candidates,
     build_universe,
     read_listings,
@@ -225,7 +226,7 @@ async def _screen_with_supplied_inputs(
         listings = await read_listings(session, rebalance_date=rebalance_date)
         bars = await read_price_window(
             session,
-            first_date=rebalance_date - dt.timedelta(days=40),
+            first_date=adv_window_start(rebalance_date, criteria.adv_lookback_days),
             last_date=rebalance_date,
         )
     candidates = [
@@ -319,7 +320,7 @@ class TestTemporalIntegrity:
             listings = await read_listings(session, rebalance_date=REBALANCE_DATE)
             bars = await read_price_window(
                 session,
-                first_date=REBALANCE_DATE - dt.timedelta(days=40),
+                first_date=adv_window_start(REBALANCE_DATE, criteria.adv_lookback_days),
                 last_date=REBALANCE_DATE,
             )
         candidates = assemble_candidates(
