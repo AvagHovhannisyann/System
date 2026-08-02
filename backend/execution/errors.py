@@ -1,0 +1,322 @@
+"""Failure taxonomy for the order management system (P11.2, directive §5 Phase 11).
+
+Every failure here is loud, and the reason is specific to execution rather than
+general hygiene. An order management system fails in two characteristic ways,
+and both of them are silent by default:
+
+**It sends the same order twice.** A retry after a timeout, a worker restarted
+mid-cycle, a broker event stream replayed from an offset — each of these
+duplicates an order unless something refuses the second copy. The duplicate is
+not a logged warning: it is a doubled position, and in the paper case it is a
+corrupted experiment whose realised slippage no longer corresponds to the
+intended trade. :class:`DuplicateOrderError` and
+:class:`IdempotencyCollisionError` exist so that a duplicate is either absorbed
+(the caller gets the incumbent order back) or refused loudly (the key matched
+but the *content* did not) — never written.
+
+**It records a state its own history cannot justify.** An order that moves from
+``FILLED`` back to ``PENDING_NEW`` reconciles against nothing: the position
+implied by the fills and the position implied by the state disagree, and the
+disagreement surfaces days later as a phantom holding.
+:class:`IllegalTransitionError`, :class:`TerminalOrderError` and
+:class:`TransitionChainError` make that unrepresentable rather than unlikely.
+
+The remaining errors guard the arithmetic around those two decisions: an order
+whose fields do not describe a tradeable instruction
+(:class:`OrderValidationError`), a fill that would take the cumulative quantity
+past the ordered quantity (:class:`FillAccountingError`), two workers appending
+to one order's history at once (:class:`ConcurrentTransitionError`), a lookup of
+an order that was never recorded (:class:`OrderNotFoundError`), and a persisted
+row whose venue is not the paper venue (:class:`NotPaperOrderError` — see
+:mod:`backend.execution` for why that is a structural impossibility rather than
+a configuration mistake).
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from backend.execution.lifecycle import OrderEvent, OrderState
+
+__all__ = [
+    "ConcurrentTransitionError",
+    "DuplicateOrderError",
+    "ExecutionError",
+    "FillAccountingError",
+    "IdempotencyCollisionError",
+    "IllegalTransitionError",
+    "NotPaperOrderError",
+    "OrderNotFoundError",
+    "OrderValidationError",
+    "TerminalOrderError",
+    "TransitionChainError",
+]
+
+
+class ExecutionError(Exception):
+    """Base class for every failure raised by :mod:`backend.execution`."""
+
+
+class OrderValidationError(ExecutionError, ValueError):
+    """Raised when an order's fields do not describe a tradeable instruction.
+
+    Examples: a non-positive share quantity (nothing to trade), a limit order
+    with no limit price or a market order carrying one (the two fields together
+    are the instruction, and either half alone is ambiguous), a limit price with
+    more precision than the price scale can represent, a slice index outside its
+    slice count.
+
+    Every one of these would otherwise reach the database and fail there against
+    a CHECK constraint. That is a real backstop and it stays, but the message it
+    produces names a constraint rather than a field, and by then the caller has
+    an open transaction to unwind. Validating in the value object means the
+    refusal names what the caller got wrong.
+
+    Subclasses :class:`ValueError` so ordinary caller-side validation and
+    ``pytest.raises(ValueError)`` keep working.
+    """
+
+
+class IllegalTransitionError(ExecutionError, ValueError):
+    """Raised when an event has no legal transition from the order's current state.
+
+    The transition table in :mod:`backend.execution.lifecycle` is a partial
+    function: 22 of the 99 ``(state, event)`` pairs are legal, and the other 77
+    are not oversights. A venue acknowledgement for an order that was never
+    released, a cancel request for an order with no venue order id to cancel
+    with, a rejection of an order that has already traded — each names a
+    disagreement between our record and the venue's, and the honest response is
+    to refuse the transition and let reconciliation (P11.3) see the mismatch.
+    Applying it anyway would produce a state whose own history does not support
+    it, which is the failure that makes a blotter untrustworthy.
+
+    Attributes:
+        state: the state the order was in.
+        event: the event that has no transition from it.
+    """
+
+    def __init__(self, *, state: OrderState, event: OrderEvent) -> None:
+        """Build the error from the current state and the refused event."""
+        self.state = state
+        self.event = event
+        super().__init__(
+            f"event {event.value!r} has no legal transition from state {state.value!r}. "
+            f"The order lifecycle is a partial function on (state, event) by design "
+            f"(backend.execution.lifecycle.TRANSITIONS): an event the current state cannot "
+            f"accept means our record and the venue's disagree, and recording it would "
+            f"produce a state the order's own history does not support"
+        )
+
+
+class TerminalOrderError(IllegalTransitionError):
+    """Raised when any event is applied to an order in a terminal state.
+
+    A subclass rather than a separate error, because it *is* an illegal
+    transition — the specialisation exists so a caller can distinguish "this
+    order is finished" from "this event is wrong for this state", which are
+    different operational situations: the first usually means a duplicate or
+    late venue message, the second means a genuine disagreement.
+
+    Terminal states (``FILLED``, ``CANCELLED``, ``REJECTED``, ``EXPIRED``) have
+    **zero** outgoing edges in the transition table. That is what makes
+    ``FILLED → PENDING_NEW`` unrepresentable rather than merely unlikely, and
+    migration 0014 restates it as a CHECK constraint so a writer that bypasses
+    this module entirely still cannot record one.
+    """
+
+    def __init__(self, *, state: OrderState, event: OrderEvent) -> None:
+        """Build the error from the terminal state and the refused event."""
+        self.state = state
+        self.event = event
+        ExecutionError.__init__(
+            self,
+            f"order is in terminal state {state.value!r}; event {event.value!r} is refused. "
+            f"Terminal states have no outgoing transitions at all — an order that could "
+            f"leave FILLED would let the position implied by its fills and the position "
+            f"implied by its state disagree, which is the reconciliation bug this machine "
+            f"exists to prevent",
+        )
+
+
+class TransitionChainError(ExecutionError, ValueError):
+    """Raised when a persisted transition history does not replay consistently.
+
+    Raised by :func:`backend.execution.lifecycle.replay`, which folds a stored
+    history back into a state. It refuses a chain whose sequence numbers are not
+    ``1..n`` without gaps, whose ``from_state`` does not equal the previous
+    row's ``to_state``, whose transitions are not all legal, or whose cumulative
+    fill quantities do not equal the running sum of the per-event quantities.
+
+    These are assertions about this system's own bookkeeping rather than about a
+    venue's behaviour, which is why they raise instead of returning a flag: an
+    order whose history cannot reconcile with itself has no honest state to
+    report, and reporting one anyway is how a phantom position is born.
+    """
+
+
+class FillAccountingError(ExecutionError, ValueError):
+    """Raised when a fill's arithmetic does not fit the order it belongs to.
+
+    Two distinct cases, both refusals rather than clamps:
+
+    - **Overfill.** The cumulative filled quantity would exceed the ordered
+      quantity. Clamping to the ordered quantity would silently discard shares
+      the venue says it traded, leaving the position and the blotter permanently
+      out of step; refusing surfaces it while the message is still in hand.
+    - **Event/arithmetic mismatch.** The caller supplied ``PARTIAL_FILL`` for a
+      fill that completes the order, or ``FILL_COMPLETE`` for one that does not.
+      Which of the two events applies is a function of the arithmetic
+      (:func:`backend.execution.lifecycle.fill_event`), never of the caller's
+      opinion, so a disagreement means one of the two is wrong and neither may
+      be trusted.
+
+    Units: every quantity in the message is in **whole shares**.
+    """
+
+
+class DuplicateOrderError(ExecutionError, RuntimeError):
+    """Raised when a duplicate submission is refused rather than absorbed.
+
+    The normal path does **not** raise: :func:`backend.execution.store.record_order`
+    absorbs a duplicate and returns the incumbent order with
+    ``was_already_recorded=True``, which is what makes a retry safe. This error
+    exists for the caller who explicitly asks for a duplicate to be an error
+    (``if_exists="refuse"``) — the operator flow where recording an order that
+    already exists means the caller's own bookkeeping is wrong.
+
+    Attributes:
+        idempotency_key: the key already present in the store.
+        order_id: the existing order's database key.
+    """
+
+    def __init__(self, *, idempotency_key: str, order_id: int) -> None:
+        """Build the error from the key and the incumbent order's id."""
+        self.idempotency_key = idempotency_key
+        self.order_id = order_id
+        super().__init__(
+            f"an order with idempotency key {idempotency_key} is already recorded as "
+            f"order_id={order_id}; refusing to record it a second time"
+        )
+
+
+class IdempotencyCollisionError(ExecutionError, RuntimeError):
+    """Raised when a stored order shares a key with a *different* order content.
+
+    The idempotency key is a SHA-256 digest of the order's canonical content, so
+    two different orders sharing a key is either a hash collision (which nobody
+    should expect to see) or, far more likely, a change to the preimage recipe
+    that was not accompanied by a version bump on
+    :data:`backend.execution.idempotency.IDEMPOTENCY_SCHEMA`.
+
+    Either way the store refuses. Treating the incumbent as "the same order"
+    would silently substitute one trade for another — the caller would believe
+    its order was already recorded when a different one was. The stored preimage
+    exists precisely so this is detectable rather than assumed: the digest is
+    verifiable against the text that produced it.
+
+    Attributes:
+        idempotency_key: the shared key.
+        order_id: the incumbent order's database key.
+        stored_preimage: the canonical JSON recorded with the incumbent.
+        computed_preimage: the canonical JSON of the order being recorded.
+    """
+
+    def __init__(
+        self,
+        *,
+        idempotency_key: str,
+        order_id: int,
+        stored_preimage: str,
+        computed_preimage: str,
+    ) -> None:
+        """Build the error from the key, the incumbent, and both preimages."""
+        self.idempotency_key = idempotency_key
+        self.order_id = order_id
+        self.stored_preimage = stored_preimage
+        self.computed_preimage = computed_preimage
+        super().__init__(
+            f"idempotency key {idempotency_key} is already held by order_id={order_id}, "
+            f"whose recorded content differs from the order being submitted. Stored "
+            f"preimage: {stored_preimage}. Computed preimage: {computed_preimage}. "
+            f"Two distinct orders cannot share one key: absorbing this submission as a "
+            f"duplicate would substitute one trade for another. If the preimage recipe "
+            f"changed, bump backend.execution.idempotency.IDEMPOTENCY_SCHEMA so old and "
+            f"new keys cannot collide"
+        )
+
+
+class ConcurrentTransitionError(ExecutionError, RuntimeError):
+    """Raised when two writers append to one order's history at the same time.
+
+    Transition rows carry a per-order ``sequence_number``, unique within the
+    order, and each writer computes ``last + 1`` from what it read. Two writers
+    that read the same tail both try to write the same sequence number, and the
+    database rejects the loser. That rejection is this error.
+
+    It is a **retryable** condition, not corruption: the loser re-reads the tail
+    (which now includes the winner's row) and decides again — its event may or
+    may not still be legal from the new state, and that is the point. The
+    alternative, letting both writes land, would produce two rows claiming the
+    same position in one order's history with no way to order them.
+
+    Optimistic control rather than a lock because the contended case is rare
+    (one reconciliation cycle at a time per order) and a lock held across a
+    broker round trip is how an OMS deadlocks itself.
+
+    Attributes:
+        order_id: the order whose history was contended.
+        sequence_number: the position both writers tried to claim.
+    """
+
+    def __init__(self, *, order_id: int, sequence_number: int) -> None:
+        """Build the error from the order and the contended sequence number."""
+        self.order_id = order_id
+        self.sequence_number = sequence_number
+        super().__init__(
+            f"transition {sequence_number} of order_id={order_id} was written by another "
+            f"writer first. Re-read the order's history and decide again: the event may no "
+            f"longer be legal from the state that now holds"
+        )
+
+
+class OrderNotFoundError(ExecutionError, LookupError):
+    """Raised when an order id or idempotency key names no recorded order.
+
+    A lookup miss is an error rather than ``None`` because every caller in this
+    package is acting on an order it believes exists — appending a venue message
+    to it, reading its state for reconciliation. ``None`` at those call sites
+    turns into an attribute error three frames away from the cause.
+    """
+
+
+class NotPaperOrderError(ExecutionError, RuntimeError):
+    """Raised when a persisted order's venue is not the paper venue.
+
+    This should be unreachable, and saying so precisely is the point of the
+    class. The venue column has a ``CHECK (venue = 'paper')`` constraint
+    (migration 0014), the Python value object takes no venue argument at all,
+    and :class:`backend.execution.orders.ExecutionVenue` has exactly one member.
+    A row that violates all three arrived by a path outside this system.
+
+    The read side refuses it rather than trusting the write side, because the
+    single claim this package makes — that nothing here can describe a live
+    order — is worth checking on both sides of the database. Directive §1.1 and
+    §9.5: live trading is not configurable, so a non-paper order is not a
+    configuration to honour but a corruption to refuse.
+
+    Attributes:
+        order_id: the offending order's database key.
+        venue: the venue string found on the row.
+    """
+
+    def __init__(self, *, order_id: int, venue: str) -> None:
+        """Build the error from the order id and the unexpected venue string."""
+        self.order_id = order_id
+        self.venue = venue
+        super().__init__(
+            f"order_id={order_id} carries venue={venue!r}, which is not the paper venue. "
+            f"This platform is paper-only and permanently so (directive §1.1, §9.5): there "
+            f"is no configuration that produces a non-paper order, so this row did not come "
+            f"from this system. Refusing to load it"
+        )
