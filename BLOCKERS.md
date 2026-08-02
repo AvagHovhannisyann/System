@@ -194,3 +194,37 @@ The harness encodes it as `WHAT_G5_STILL_NEEDS`:
    Markets* 5(1) for illiquidity.
 
 Item 5 is not blocked on a human — it is ordinary work for P5.6. Items 1–4 are B1.
+
+## B7 — Short-interest feed: no source selected — OPEN (2026-08-02)
+
+**Blocks:** the `short_interest` factor (P5.3), and G5's coverage clause through it.
+**Found by:** the P5.3 wave-2 track, which declined to borrow B1 for it.
+
+**Why this is its own blocker and not part of B1.** B1 is DECIDED — Sharadar SF1 / SEP /
+SFP / ACTIONS. **None of those four carries short interest.** There is no
+`short_interest_report` table, **no Phase 3 connector task, and no prior BLOCKERS entry**.
+The gap was unregistered until now, and the factor's error message says so explicitly
+rather than reporting "blocked on B1", which would have quietly attached it to a decision
+already taken and made it look owned. `require_short_interest_source` distinguishes three
+states, most specific first: source unregistered → `ShortInterestSourceUnavailableError`;
+short-interest feed present but fundamentals absent → the existing B1 error; both present →
+`ShortInterestComputationNotWrittenError`, so the task cannot go missing once the data
+arrives. Mutating the gate to report B1 first fails 7 tests.
+
+**Source of record:** FINRA Rule 4560 — semi-monthly, settlement dates on the 15th and the
+last business day, disseminated roughly eight business days after the settlement date.
+
+**The temporal trap, which is the reason to be careful about the vendor choice.** The
+settlement date is the obvious join key, the obvious `valid_from`, and **the obvious wrong
+`knowledge_time`**. A connector that substitutes one for the other grants eight business
+days of foresight twice a month, forever — and the resulting factor looks *better*: right
+sign, right magnitude, healthy distribution, improved backtest. The declared 17-day lag
+(14 publication + 1 intraday + 2 vendor redistribution) covers the whole gap rather than a
+residual around it, deliberately. That margin is close to free here because the observation
+is semi-monthly: extra days change *which* observation is read on a handful of dates rather
+than discarding a bar of signal — the asymmetry that makes D-027 refuse a margin on daily
+prices.
+
+**Needed from the human:** pick a source (the FINRA file directly, or a vendor that
+redistributes it), confirm whether its cost is acceptable, and add the connector as a Phase
+3 task. Until then the factor refuses and G5's coverage clause stays open.

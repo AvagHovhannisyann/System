@@ -23,7 +23,12 @@ import pytest
 
 from backend.features.compute import resolve_as_of
 from backend.features.errors import AvailabilityLagViolationError
-from backend.features.factors import BASELINE_FACTORS, FUNDAMENTALS_TABLE, PRICE_SOURCE_TABLE
+from backend.features.factors import (
+    BASELINE_FACTORS,
+    FUNDAMENTALS_TABLE,
+    PRICE_SOURCE_TABLE,
+    SHORT_INTEREST_TABLE,
+)
 from backend.features.registry import default_registry
 from backend.features.spec import MAX_FEATURES, FeatureSpec, compute_instant
 
@@ -32,6 +37,8 @@ COMPUTE_DATE = dt.date(2026, 3, 2)
 
 ZERO_LAG = dt.timedelta(0)
 FUNDAMENTAL_LAG = dt.timedelta(days=7)
+SHORT_INTEREST_LAG = dt.timedelta(days=17)
+"""14 days of publication gap + 1 intraday + 2 vendor redistribution (P5.3 wave 2)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,13 +113,32 @@ EXPECTED: dict[str, Expectation] = {
         units_contains="dimensionless fraction",
         premium_sign="NEGATIVE",
     ),
+    # Added in P5.3 wave 2, completing the eleven factors PLAN.md names.
+    "amihud_illiquidity": Expectation(
+        lag=ZERO_LAG,
+        tables=frozenset({PRICE_SOURCE_TABLE}),
+        units_contains="1/USD",
+        premium_sign="POSITIVE",
+    ),
+    "size": Expectation(
+        lag=FUNDAMENTAL_LAG,
+        tables=frozenset({FUNDAMENTALS_TABLE, PRICE_SOURCE_TABLE}),
+        units_contains="natural log of market capitalization",
+        premium_sign="NEGATIVE",
+    ),
+    "short_interest": Expectation(
+        lag=SHORT_INTEREST_LAG,
+        tables=frozenset({SHORT_INTEREST_TABLE, FUNDAMENTALS_TABLE}),
+        units_contains="dimensionless fraction",
+        premium_sign="NEGATIVE",
+    ),
 }
 
 BY_NAME: dict[str, FeatureSpec] = {spec.name: spec for spec in BASELINE_FACTORS}
 
 
-def test_exactly_the_nine_planned_factors_are_declared() -> None:
-    """P5.3's nine baseline factors, no more and no fewer."""
+def test_exactly_the_planned_baseline_factors_are_declared() -> None:
+    """P5.3's twelve baseline factors, no more and no fewer."""
     assert sorted(BY_NAME) == sorted(EXPECTED)
 
 
@@ -194,14 +220,35 @@ def test_a_caller_may_reconstruct_the_factor_at_an_older_instant(name: str) -> N
     assert resolve_as_of(spec, COMPUTE_DATE, requested_as_of=older) == older
 
 
-def test_the_fundamental_factors_share_one_lag() -> None:
-    """One table, one undecided connector policy, one margin — not nine opinions."""
-    fundamental_lags = {
+def test_the_factors_whose_slowest_leg_is_fundamentals_share_one_lag() -> None:
+    """One table, one undecided connector policy, one margin — not many opinions.
+
+    Scoped to factors whose sources are fundamentals and prices *only*, because
+    those are the ones whose margin is entirely the P3.5 connector's unresolved
+    policy. A factor reading a third, slower source is governed by that source
+    instead; see the companion test below.
+    """
+    fundamental_regime = frozenset({FUNDAMENTALS_TABLE, PRICE_SOURCE_TABLE})
+    lags = {
         BY_NAME[name].availability_lag
         for name, expectation in EXPECTED.items()
-        if FUNDAMENTALS_TABLE in expectation.tables
+        if FUNDAMENTALS_TABLE in expectation.tables and expectation.tables <= fundamental_regime
     }
-    assert fundamental_lags == {FUNDAMENTAL_LAG}
+    assert lags == {FUNDAMENTAL_LAG}
+
+
+def test_every_factor_reading_fundamentals_covers_at_least_the_fundamentals_lag() -> None:
+    """A slower second source raises the margin; it must never lower it.
+
+    ``short_interest`` reads the share count for its denominator, so whatever
+    its publication gap demands, it must still cover the fundamentals leg. This
+    is the max-not-sum rule stated as a check: 17 days is correct because it
+    exceeds both regimes, and 24 (the sum) would be needless signal loss while
+    anything under 7 would read a share count before it was knowable.
+    """
+    for name, expectation in EXPECTED.items():
+        if FUNDAMENTALS_TABLE in expectation.tables:
+            assert BY_NAME[name].availability_lag >= FUNDAMENTAL_LAG, name
 
 
 def test_the_price_factors_carry_no_margin_of_their_own() -> None:
@@ -214,13 +261,13 @@ def test_the_price_factors_carry_no_margin_of_their_own() -> None:
     assert price_only_lags == {ZERO_LAG}
 
 
-def test_the_nine_factors_fit_inside_the_thirty_feature_cap() -> None:
+def test_the_baseline_factors_fit_inside_the_thirty_feature_cap() -> None:
     """Directive §5: the cap includes Phase 7's LLM features, so headroom is the finding."""
     registry = default_registry()
-    assert len(BASELINE_FACTORS) == 9
+    assert len(BASELINE_FACTORS) == 12
     assert set(BY_NAME) <= set(registry.names())
     assert len(registry) <= MAX_FEATURES
     assert registry.remaining_capacity() == MAX_FEATURES - len(registry)
-    # PLAN.md P5.3 also names size, short interest and Amihud illiquidity, and
-    # Phase 7 spends the rest. Nine factors must not have eaten the budget.
-    assert registry.remaining_capacity() >= 3
+    # Every factor PLAN.md P5.3 names is now declared; Phase 7 spends the rest.
+    # Twelve factors must not have eaten the budget.
+    assert registry.remaining_capacity() >= 18
