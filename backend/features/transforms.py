@@ -395,7 +395,7 @@ def cross_sectional_zscore(values: npt.NDArray[np.float64]) -> npt.NDArray[np.fl
         return np.full(array.shape, np.nan, dtype=np.float64)
 
     mean = float(np.mean(observed))
-    standard_deviation = float(np.std(observed, ddof=0))
+    standard_deviation = float(np.std(observed, ddof=1))
     scale = float(np.max(np.abs(observed)))
     if not statistics_are_representable(mean, standard_deviation, scale):
         return np.full(array.shape, np.nan, dtype=np.float64)
@@ -483,15 +483,16 @@ def neutralize(
     usable = counts >= MINIMUM_GROUP_MEMBERS_FOR_NEUTRALIZATION
     means = np.full(n_groups, np.nan, dtype=np.float64)
     means[usable] = totals[usable] / counts[usable]
-    # A group whose present values sum past the float64 range has no
-    # representable mean. That is a condition of the data on this date, so its
-    # members are NaN — not `inf`, which is not a measurement of anything.
-    means[np.isinf(means)] = np.nan
 
     # NaN in `means` propagates to every member of an unusable group; NaN in
-    # `array` propagates for every absent value. Neither is filled. The residual
-    # itself can still overflow — a value and a group mean near opposite ends of
-    # the range differ by more than float64 can hold — and that entry is NaN too.
+    # `array` propagates for every absent value. Neither is filled.
+    #
+    # Two float64 overflows are reachable here and both are handled by the one
+    # filter on the way out, because both surface as an infinite *residual*: a
+    # group whose present values sum past the range has an infinite mean, and a
+    # finite value minus an infinite mean is infinite; and a value and a finite
+    # group mean near opposite ends of the range differ by more than float64 can
+    # hold. Either way the entry is "not available" rather than `inf`.
     return nan_where_overflowed(np.asarray(array - means[codes], dtype=np.float64))
 
 
@@ -572,16 +573,21 @@ def beta_neutralize(
         return np.full(array.shape, np.nan, dtype=np.float64)
 
     value_mean = float(np.mean(fitted_values))
-    numerator = float(np.dot(centered_betas, fitted_values - value_mean))
+    # `denominator` is the sum of squared centred betas — the same sum
+    # `np.std(..., ddof=1)` takes above, before its division and square root. So
+    # the dispersion check has already settled both of its failure modes: the sum
+    # is zero exactly when that standard deviation is zero, which is degenerate
+    # at any scale (`0 <= tolerance * scale` for every non-negative scale), and
+    # it is infinite exactly when that standard deviation is, which the
+    # representability check refuses. Past those two, it is finite and positive.
     denominator = float(np.dot(centered_betas, centered_betas))
-    # `denominator` is (n - 1) times the variance of the fitted betas, which the
-    # dispersion check has already found non-degenerate — but a spread small
-    # enough to square to zero underflows it anyway, and dividing by that would
-    # manufacture an infinite slope from finite data.
-    if not statistics_are_representable(value_mean, numerator, denominator) or denominator <= 0.0:
-        return np.full(array.shape, np.nan, dtype=np.float64)
-    slope = numerator / denominator
+    slope = float(np.dot(centered_betas, fitted_values - value_mean)) / denominator
 
+    # An infinite `value_mean` or an infinite slope — both reachable from finite
+    # values near the top of the range — make every residual infinite, and the
+    # filter turns those into NaN. Guarding the statistics separately would be
+    # unreachable code: it was written, and a mutation pass proved no input can
+    # tell the two versions apart.
     result = np.full(array.shape, np.nan, dtype=np.float64)
     result[present] = nan_where_overflowed(fitted_values - value_mean - slope * centered_betas)
     return result

@@ -124,6 +124,7 @@ def as_float_1d(values: npt.ArrayLike, *, name: str) -> FloatArray:
     except (TypeError, ValueError) as exc:
         msg = f"{name} must be numeric; could not convert to float64 ({exc})"
         raise ValueError(msg) from exc
+    array = array.reshape(-1) if array.ndim == 2 else array
     if array.ndim != 1:
         msg = (
             f"{name} must be a one-dimensional cross-section (one element per "
