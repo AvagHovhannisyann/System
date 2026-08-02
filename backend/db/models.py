@@ -1285,3 +1285,211 @@ class ExtractionResult(Base):
             "Ordering key is `result_id`, not this."
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 tables (P4.1/P4.2, migration 0011): persisted universe snapshots
+#
+# Two tables recording what the point-in-time universe screen decided on one
+# rebalance date under one set of criteria, **append-only** by the same
+# ``BEFORE UPDATE OR DELETE`` trigger shape revisions 0003/0004/0007/0009/0010
+# use.
+#
+# Neither is bitemporal, for the reason recorded above the Phase 7 tables: the
+# bitemporal columns describe when a fact was true in the world and when it
+# became knowable to the *market* (D-011). A universe snapshot is a computation
+# **we** ran over facts that are already bitemporal. Its inputs carry the
+# knowledge times; the snapshot carries the ``as_of`` instant it read them at,
+# which is the whole of its point-in-time content. Inventing a separate
+# ``knowledge_time`` for it would be a fabricated value in the one column whose
+# meaning is that it is not fabricated (I3).
+#
+# Neither is a hypertable: rebalance dates are monthly-to-weekly, so a decade of
+# history is hundreds of snapshot rows, not an event-time stream worth chunking.
+# ---------------------------------------------------------------------------
+
+
+class UniverseSnapshot(Base):
+    """One point-in-time universe build: criteria, instant, and counts (P4.1).
+
+    The header row for one execution of
+    :func:`backend.universe.builder.build_universe`. Its members and the
+    per-name screening outcomes live in :class:`UniverseMember`, one row per
+    **candidate considered** — not per member — because §6.3 requires a
+    filter-impact waterfall showing how many names each screen removed, and a
+    table holding only survivors cannot answer that. See that class's docstring.
+
+    **Name collision, stated rather than discovered:**
+    :class:`backend.universe.snapshot.UniverseSnapshot` is the in-memory value
+    object this table persists. They carry the same fields and the same meaning;
+    this one is the row, that one is the result. Code that needs both imports
+    this module qualified (``models.UniverseSnapshot``).
+
+    **Identity is** ``(rebalance_date, criteria_hash, as_of)``, and it is
+    unique. Those three values determine the snapshot completely given the
+    contents of the bitemporal store, which is exactly the reproducibility claim
+    I2 asks for: same criteria, same rebalance date, same knowledge instant,
+    same universe. Re-running a build after more data has been ingested is a
+    *different* ``as_of`` and therefore a new row rather than a correction —
+    which is what makes "the universe as we knew it on date X" answerable after
+    the fact.
+
+    Deliberately **no reproducibility stamp columns.** A universe build is
+    deterministic: it draws no random numbers, so
+    :class:`~backend.tracking.stamp.ReproducibilityStamp` cannot be constructed
+    for it without inventing a seed, and that module refuses partial stamps for
+    precisely this reason. The criteria hash is produced by the same
+    canonicalisation the stamp uses
+    (:func:`~backend.tracking.stamp.canonical_config_hash`), and ``as_of`` is
+    the data version of a point-in-time read.
+
+    Units: ``rebalance_date`` is an exchange-calendar date with no time
+    component; ``as_of`` is a timezone-aware UTC instant; both counts are
+    dimensionless counts of securities.
+    """
+
+    __tablename__ = "universe_snapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "rebalance_date",
+            "criteria_hash",
+            "as_of",
+            name="uq_universe_snapshot_build",
+        ),
+        # CHECK names are given unprefixed: the metadata naming convention
+        # (ck_%(table_name)s_%(constraint_name)s) expands them, so an
+        # already-prefixed name would double the prefix and diverge from the
+        # names migration 0011 creates.
+        CheckConstraint("criteria_hash <> ''", name="criteria_hash_not_empty"),
+        CheckConstraint("candidate_count >= 0", name="candidate_count_non_negative"),
+        CheckConstraint("member_count >= 0", name="member_count_non_negative"),
+        # A member is a candidate that failed nothing, so members can never
+        # outnumber the names considered. A violation here means the screen and
+        # the counts disagree, which is the one arithmetic error that would make
+        # every waterfall built from this row wrong.
+        CheckConstraint("member_count <= candidate_count", name="members_within_candidates"),
+    )
+
+    snapshot_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+        doc="Surrogate row key, database-generated. Dimensionless.",
+    )
+    rebalance_date: Mapped[dt.date] = mapped_column(
+        Date,
+        nullable=False,
+        doc="The rebalance date this universe was built for (calendar date, no time part).",
+    )
+    criteria_hash: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "SHA-256 hex digest of the canonical JSON of `criteria` "
+            "(backend.universe.criteria.UniverseCriteria.criteria_hash). 64 lowercase hex "
+            "characters. Two snapshots are comparable only when this matches."
+        ),
+    )
+    criteria: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        doc=(
+            "The screening criteria as canonical JSON — the preimage of criteria_hash. "
+            "Stored beside the digest so a snapshot states its own screens rather than "
+            "referring to a hash nobody can invert, and so the digest is verifiable."
+        ),
+    )
+    as_of: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        doc=(
+            "The knowledge instant the inputs were read at, UTC — the as_of bound on the "
+            "session that built this snapshot (I1). This is the snapshot's data version: "
+            "the same criteria at the same rebalance date read at a later as_of may give a "
+            "different universe, and that difference is information, not an inconsistency."
+        ),
+    )
+    candidate_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="Securities considered — listed at the rebalance date, before any screen (count).",
+    )
+    member_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="Securities passing every applied screen (count). Never exceeds candidate_count.",
+    )
+    built_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc=(
+            "When the row was written, UTC, from the database clock at transaction start. "
+            "Wall-clock provenance only — never a knowledge time, and never used to order "
+            "snapshots (rebalance_date does that)."
+        ),
+    )
+
+
+class UniverseMember(Base):
+    """One candidate's screening outcome within one snapshot (P4.1/P4.2).
+
+    **One row per candidate considered, not per member.** The class is named for
+    the question it usually answers — "who was in the universe on this date" —
+    but storing only survivors would make §6.3's filter-impact waterfall
+    unreconstructible from the record, and P4.2 requires exactly that
+    reconstruction. So an excluded name gets a row too, carrying
+    :attr:`failed_filters`: every screen it failed, ordered by
+    :data:`~backend.universe.criteria.FILTER_ORDER`. Members are the rows with
+    ``included = true``, which the database also guarantees is exactly the rows
+    with an empty ``failed_filters`` (the CHECK below).
+
+    Recording *every* failure rather than only the attributed one is deliberate.
+    The waterfall needs only ``failed_filters[0]`` — a name failing three screens
+    is counted once, against the earliest — but the operator's real question is
+    whether loosening one screen would bring a name back, and that is
+    unanswerable from a single attribution. The extra failures cost a few bytes
+    and cannot be recovered later.
+
+    The foreign key to ``security`` is the identity anchor, not the bitemporal
+    ``security_master``: a versioned table's logical key is not unique per row,
+    so it cannot be a foreign-key target (D-011). Which *version* of the identity
+    was in force is a function of the snapshot's ``rebalance_date`` and ``as_of``
+    and is re-derivable through :func:`backend.db.as_of`.
+    """
+
+    __tablename__ = "universe_member"
+    __table_args__ = (
+        CheckConstraint(
+            "included = (jsonb_array_length(failed_filters) = 0)",
+            name="included_iff_no_failures",
+        ),
+    )
+
+    snapshot_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("universe_snapshot.snapshot_id"),
+        primary_key=True,
+        doc="The snapshot this outcome belongs to.",
+    )
+    security_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("security.security_id"),
+        primary_key=True,
+        doc="The candidate, by identity-anchor key. One row per security per snapshot.",
+    )
+    included: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        doc="True when the name passed every applied screen — i.e. is a universe member.",
+    )
+    failed_filters: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        doc=(
+            "Screens this name failed, as a JSON array of names ordered by "
+            "backend.universe.criteria.FILTER_ORDER. Empty exactly when included is true. "
+            "The waterfall attributes the exclusion to element 0."
+        ),
+    )
