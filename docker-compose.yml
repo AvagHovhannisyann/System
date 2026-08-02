@@ -28,6 +28,47 @@ services:
       timeout: 3s
       retries: 12
 
+  mlflow:
+    # Experiment tracking store for I2 (CC.3). Version pinned to the same 3.15.0
+    # the `mlflow` client in uv.lock resolves to: client and server share a
+    # backing-store schema, and a floating tag would let a `docker compose pull`
+    # migrate the store out from under the pinned client.
+    image: ghcr.io/mlflow/mlflow:v3.15.0
+    command:
+      - mlflow
+      - server
+      - --host=0.0.0.0
+      - --port=5000
+      # SQLite, not the file store: MLflow 3 put the filesystem backend in
+      # maintenance mode, and this is the same serverless backend
+      # backend/tracking/mlflow_run.py uses locally. Single worker because
+      # concurrent writers to one SQLite file produce "database is locked";
+      # a shared team server would move --backend-store-uri to Postgres.
+      - --workers=1
+      - --backend-store-uri=sqlite:////mlflow/mlflow.db
+      # Runs and artifacts both land on the mlflowdata volume, so history
+      # survives `docker compose down` and any container replacement. A
+      # tracking server that loses history does not satisfy I2.
+      - --artifacts-destination=/mlflow/artifacts
+      # MLflow 3 validates the Host header against localhost + private IPs by
+      # default, and rejects everything else with 403. `mlflow:5000` is a
+      # hostname, not an IP, so the backend's calls would be refused without
+      # this. Passing the flag REPLACES the defaults, hence the localhost
+      # entries for the browser on the host. Note the /health endpoint is
+      # exempt from this check, so the healthcheck below stays green even if
+      # this list is wrong — the compose test asserts the service name is in it.
+      - --allowed-hosts=mlflow:5000,localhost:5000,127.0.0.1:5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflowdata:/mlflow
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/health', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
   backend:
     build:
       context: .
@@ -35,6 +76,10 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quant}@db:5432/${POSTGRES_DB:-quant}
       REDIS_URL: redis://redis:6379/0
+      # Read by the MLflow client as its default tracking URI. Not templated:
+      # this is a compose-network address, and pointing it elsewhere by
+      # environment is how runs end up recorded somewhere nobody looks.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
       ENVIRONMENT: ${ENVIRONMENT:-dev}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Required at ENVIRONMENT=prod (hard startup failure without it); at the
@@ -47,6 +92,11 @@ services:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      # service_healthy, like the other two: a training or backtest job started
+      # before the tracking server is up cannot record its reproducibility
+      # stamp, and an unrecorded result is one nobody can regenerate (I2).
+      mlflow:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).status==200 else 1)"]
@@ -67,3 +117,4 @@ services:
 
 volumes:
   dbdata:
+  mlflowdata:

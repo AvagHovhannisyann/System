@@ -19,10 +19,30 @@ docker compose up
 
 - Backend API: http://localhost:8000 (health: `/api/health`)
 - Dashboard: http://localhost:3000
+- MLflow tracking UI: http://localhost:5000
 
 `SEC_USER_AGENT` is required before the EDGAR connector will run — SEC's
 fair-access policy requires a contact string, and the connector refuses rather
 than sending an anonymous or invented one.
+
+### Experiment tracking
+
+The `mlflow` service is the store every run's reproducibility stamp is written
+to (invariant I2). Its SQLite backing store and its artifacts both live on the
+`mlflowdata` named volume, so history survives `docker compose down` and any
+container replacement — `docker compose down -v` deletes that volume and with
+it every recorded run. The server image is pinned to the same MLflow version
+`uv.lock` resolves the client to, because the two share a store schema.
+
+The backend container is given `MLFLOW_TRACKING_URI=http://mlflow:5000`, the
+variable the MLflow client reads for its default tracking URI.
+`backend.tracking.mlflow_run.tracked_run` still takes the URI as an explicit
+argument — it never falls back to a default — so a caller inside the container
+passes `mlflow.get_tracking_uri()`, which resolves to that address.
+
+Tests and local scripts do **not** need this service:
+`backend.tracking.mlflow_run.local_tracking_store` builds a serverless store
+under any directory.
 
 ## Development
 
@@ -44,6 +64,46 @@ npm run test:e2e                  # Playwright
 Integration tests start real PostgreSQL/TimescaleDB and Redis containers via
 Testcontainers, so a working Docker daemon is required. Tests are never skipped
 when infrastructure is missing — they fail, per I6.
+
+## Data versioning (DVC)
+
+DVC is initialised at the repository root: `.dvc/config`, `.dvc/.gitignore` and
+`.dvcignore` are committed, the content cache and `.dvc/config.local` are not.
+It is what keeps data out of git while still producing the **data version** that
+I2 demands next to the git commit, config hash and seed.
+
+`dvc` is not yet a declared project dependency, so `uv sync` will not install
+it. Install it into the environment you run it from, then version the data
+directory:
+
+```bash
+uv tool install dvc            # or: pipx install dvc
+
+dvc add data                   # writes data.dvc — a content hash, not the bytes
+                               # and appends /data to .gitignore
+git add data.dvc .gitignore    # commit the pointer. Never commit data/ itself
+```
+
+Record that hash so every run stamps the snapshot it actually read — either per
+process, or in the committed `.data-version` pointer:
+
+```bash
+export DATA_VERSION=$(uv run python -c \
+  "import yaml,pathlib;print(yaml.safe_load(pathlib.Path('data.dvc').read_text())['outs'][0]['md5'])")
+
+uv run python -c "from backend.tracking.data_version import default_pointer_path, \
+write_data_version; write_data_version(default_pointer_path(), '$DATA_VERSION')"
+```
+
+`backend.tracking.data_version.resolve_data_version` reads `DATA_VERSION` first
+and the pointer file second. There is no third fallback: with neither present it
+raises, because a result whose data version is unknown is not reproducible and
+recording a guess would hide that.
+
+No DVC remote is configured yet, so `dvc push` / `dvc pull` are unavailable and
+the cache is local only — the storage location and its credentials are a human
+decision (credentials go in `.dvc/config.local`, which is gitignored, never in
+`.dvc/config`, which is tracked).
 
 ## What exists today
 
