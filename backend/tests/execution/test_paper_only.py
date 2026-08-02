@@ -159,9 +159,12 @@ def test_the_package_has_modules_to_check() -> None:
     assert names == {
         "__init__.py",
         "errors.py",
+        "halt.py",
         "idempotency.py",
+        "killswitch.py",
         "lifecycle.py",
         "orders.py",
+        "reconciliation.py",
         "store.py",
     }
 

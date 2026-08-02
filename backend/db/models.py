@@ -2294,3 +2294,833 @@ class LlmSpendLedger(Base):
         server_default=func.now(),
         doc="When the row was written, UTC, from the database clock. Wall-clock provenance only.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 tables (P11.3 and P11.5, migration 0016): reconciliation and the halt log
+#
+# Both are append-only for the same reason ``execution_order`` is: a
+# reconciliation records what two snapshots said at a moment, and a halt records
+# something that happened. Neither stops being true later. A correction is a new
+# reconciliation and a re-halt is a new engagement; erasing either would destroy
+# the trail an operator has to reason backwards through.
+# ---------------------------------------------------------------------------
+
+
+class ExecutionReconciliation(Base):
+    """One cycle's comparison of our book against a statement (P11.3).
+
+    The row is not a summary of a comparison — it is the comparison's **inputs and
+    its output together**. Both snapshots are stored in full beside their digests,
+    which is what makes a break investigable after the fact:
+    :func:`backend.execution.reconciliation.rerun` rebuilds the snapshots from
+    these payloads, re-derives the verdict, and refuses if the digest has moved.
+    A row holding only "3 breaks found" would be a claim nobody could check.
+
+    Each stored payload is exactly the preimage of its stored digest (canonical
+    JSON, keys sorted at every level), so the two cannot drift apart: a digest
+    that does not hash from the payload beside it is detectable rather than
+    assumed.
+
+    ``result_digest`` deliberately does **not** cover the I2 stamp. A stored
+    verdict must re-derive identically when re-run at a later commit; if the stamp
+    were in the digest, every re-run would differ by construction and
+    re-runnability could not be tested. The stamp lives in its own columns.
+
+    ``cash_tolerance_usd`` is copied onto the row rather than read from code at
+    query time, for the same reason ``llm_spend_ledger`` copies its caps: a
+    tolerance widened next month must not rewrite last month's verdict.
+
+    Units: ``cash_tolerance_usd`` is US dollars; share counts inside the snapshot
+    payloads are signed whole shares; the two ``*_observed_at`` columns are
+    timezone-aware instants.
+    """
+
+    __tablename__ = "execution_reconciliation"
+    __table_args__ = (
+        # CHECK names are given unprefixed: the metadata naming convention
+        # (ck_%(table_name)s_%(constraint_name)s) expands them, so an
+        # already-prefixed name would double the prefix and diverge from the
+        # names migration 0016 creates.
+        CheckConstraint("cycle_id <> ''", name="cycle_id_present"),
+        # Our own ledger cannot stand in for the statement it is checked against:
+        # a reconciliation of a snapshot with itself always passes and proves
+        # nothing, which is the most comfortable way for this control to become
+        # decorative.
+        CheckConstraint("internal_origin = 'internal_ledger'", name="internal_origin_is_ledger"),
+        # I3, restated in SQL: a statement from a real-money account has no
+        # representation here. A third value needs a migration, not a config edit.
+        CheckConstraint(
+            "reported_origin IN ('paper_broker', 'simulated')",
+            name="reported_origin_is_not_live",
+        ),
+        CheckConstraint("internal_digest ~ '^[0-9a-f]{64}$'", name="internal_digest_is_sha256"),
+        CheckConstraint("reported_digest ~ '^[0-9a-f]{64}$'", name="reported_digest_is_sha256"),
+        CheckConstraint("result_digest ~ '^[0-9a-f]{64}$'", name="result_digest_is_sha256"),
+        # The ceiling from backend.execution.reconciliation.MAX_CASH_TOLERANCE_USD,
+        # restated where no Python can waive it. Above five cents a "tolerance"
+        # absorbs an event rather than a quantisation step between a two-decimal
+        # statement and a six-decimal ledger, and no magnitude of event is
+        # rounding. Zero is allowed: tightening is always permitted.
+        CheckConstraint(
+            "cash_tolerance_usd >= 0 AND cash_tolerance_usd <= 0.05",
+            name="tolerance_within_ceiling",
+        ),
+        CheckConstraint(
+            "finding_count >= 0 AND break_count >= 0 AND break_count <= finding_count",
+            name="counts_consistent",
+        ),
+        # The verdict is a function of the findings, not an independent opinion.
+        CheckConstraint("matched = (break_count = 0)", name="matched_iff_no_breaks"),
+        # I2: all four stamp components on every verdict, so a break traces to the
+        # commit and config that produced it.
+        CheckConstraint("git_commit ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'", name="git_commit_is_sha"),
+        CheckConstraint("config_hash ~ '^[0-9a-f]{64}$'", name="config_hash_is_sha256"),
+        CheckConstraint("data_version <> ''", name="data_version_present"),
+        CheckConstraint("seed >= 0", name="seed_non_negative"),
+    )
+
+    reconciliation_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+        doc="Surrogate row key, database-generated. Dimensionless; also the append order.",
+    )
+    cycle_id: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "The execution cycle this verdict judges. A verdict about another cycle is not "
+            "evidence about this one, and the kill switch refuses to accept one."
+        ),
+    )
+    internal_origin: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="Always 'internal_ledger' (CHECK). The side derived from our own records.",
+    )
+    reported_origin: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "'paper_broker' or 'simulated' (CHECK) — see "
+            "backend.execution.reconciliation.SnapshotOrigin. There is no member for a "
+            "real-money account, so a fabricated statement is a distinct value on the row "
+            "rather than something a reader has to infer (I3)."
+        ),
+    )
+    internal_snapshot: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        doc=(
+            "Our snapshot as canonical JSON — the preimage of internal_digest. Stored in full "
+            "so the verdict can be re-derived from the row alone rather than from a hash "
+            "nobody can invert."
+        ),
+    )
+    internal_digest: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="SHA-256 hex digest of internal_snapshot (64 lowercase hex characters).",
+    )
+    reported_snapshot: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        doc="The statement snapshot as canonical JSON — the preimage of reported_digest.",
+    )
+    reported_digest: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="SHA-256 hex digest of reported_snapshot (64 lowercase hex characters).",
+    )
+    internal_observed_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        doc="When our book looked like internal_snapshot, UTC. Never an ordering key.",
+    )
+    reported_observed_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        doc=(
+            "When the statement was observed, UTC. Reconciliation refuses two snapshots more "
+            "than MAX_SNAPSHOT_SKEW_SECONDS apart: they describe two different books, and any "
+            "difference between them is explained by the activity in the gap."
+        ),
+    )
+    cash_tolerance_usd: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6),
+        nullable=False,
+        doc=(
+            "The allowed absolute cash divergence in US dollars, as it stood when this verdict "
+            "was taken. One cent by default: it bounds one quantisation step between a "
+            "two-decimal statement and a six-decimal ledger, and bounds nothing else — the "
+            "cheapest real break is larger by orders of magnitude."
+        ),
+    )
+    findings: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        doc=(
+            "Every finding in the verdict's fixed order, as canonical JSON. Includes "
+            "observations that are not breaks — notably a position both sides call flat where "
+            "one said so and the other was silent, which is recorded precisely because a "
+            "missing position and a zero position are different facts."
+        ),
+    )
+    finding_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="Number of findings (count). Stored so a truncated payload is detectable.",
+    )
+    break_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="Number of findings whose severity is 'break' (count). Never exceeds finding_count.",
+    )
+    matched: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        doc="True exactly when break_count is zero (CHECK). Observations do not prevent a match.",
+    )
+    result_digest: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "SHA-256 hex digest over the cycle, the tolerance, both snapshot digests and every "
+            "finding — and deliberately NOT over the I2 stamp, so a re-run at a later commit "
+            "must reproduce it exactly. That equality is the re-runnability guarantee."
+        ),
+    )
+    git_commit: Mapped[str] = mapped_column(
+        Text, nullable=False, doc="I2: full commit SHA of the run that produced the verdict."
+    )
+    git_dirty: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        doc="I2: whether the working tree differed from HEAD, counting untracked files.",
+    )
+    data_version: Mapped[str] = mapped_column(
+        Text, nullable=False, doc="I2: identifier of the data snapshot used."
+    )
+    config_hash: Mapped[str] = mapped_column(
+        Text, nullable=False, doc="I2: SHA-256 canonical config hash (64 lowercase hex)."
+    )
+    seed: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, doc="I2: the random seed, recorded verbatim. Dimensionless."
+    )
+    recorded_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc="When the row was written, UTC, from the database clock. Wall-clock provenance only.",
+    )
+
+
+class ExecutionHalt(Base):
+    """The halt log: engagements and their clearances, append-only (P11.5).
+
+    **A halt is a row, not a flag.** A halt held in memory evaporates on restart,
+    and it evaporates at exactly the moment it matters — the process that halted
+    crashes, the supervisor restarts it, and the new worker begins its next cycle
+    believing nothing is wrong while the condition is still true and now
+    unobserved. Nothing in :mod:`backend.execution` caches this state; the current
+    state is a fold over these rows, computed on every read.
+
+    An ``engaged`` row is open until a ``cleared`` row names it in
+    ``clears_halt_id``. There is no timeout, no automatic re-arm, and no path by
+    which the condition going away clears the halt: a halt outlives its cause,
+    because the point of halting is that a human looks. The clearance carries who
+    and why, both non-blank by CHECK, so the log answers "who turned this back on".
+
+    Two refusals live here rather than in Python — ``UNIQUE (clears_halt_id)`` so a
+    halt is cleared at most once, and the ``execution_halt_clearance_guard``
+    trigger so a clearance can only name an engagement. **Neither constrains an
+    engagement**, deliberately: a constraint that can reject a halt-engage row is
+    a constraint that can stop the kill switch from firing, and a redundant halt
+    row costs nothing while a refused one costs everything.
+
+    ``cycle_id`` is what makes the directive's "halts within one cycle" auditable
+    after the fact: the halt written by the cycle that observed the condition
+    carries that cycle's own id, so the log itself shows that no cycle elapsed in
+    between.
+    """
+
+    __tablename__ = "execution_halt"
+    __table_args__ = (
+        # A halt is cleared at most once. NULLs are distinct in Postgres, so this
+        # leaves engagements — which all carry NULL here — completely unconstrained.
+        UniqueConstraint("clears_halt_id", name="uq_execution_halt_clears_halt_id"),
+        CheckConstraint("event IN ('engaged', 'cleared')", name="event_is_known"),
+        # D-030 shape, both directions: the trigger names the condition on an
+        # engagement and is absent on a clearance. A clearance carrying a trigger
+        # would read as a second halt.
+        CheckConstraint(
+            "(event = 'engaged') = (halt_trigger IS NOT NULL)", name="trigger_iff_engaged"
+        ),
+        CheckConstraint(
+            "halt_trigger IS NULL OR halt_trigger IN ("
+            "'drawdown_breach', 'stale_data', 'reconciliation_mismatch', 'manual', "
+            "'unknown_condition')",
+            name="trigger_is_known",
+        ),
+        # The three clearance columns arrive together or not at all: a clearance
+        # missing its attribution is an anonymous re-enable, and an engagement
+        # carrying one is a halt that pre-authorises its own removal.
+        CheckConstraint(
+            "(event = 'cleared') = ("
+            "clears_halt_id IS NOT NULL AND cleared_by IS NOT NULL "
+            "AND clearance_reason IS NOT NULL)",
+            name="clearance_fields_iff_cleared",
+        ),
+        CheckConstraint("cleared_by IS NULL OR cleared_by <> ''", name="cleared_by_present"),
+        CheckConstraint(
+            "clearance_reason IS NULL OR clearance_reason <> ''", name="clearance_reason_present"
+        ),
+        CheckConstraint("cycle_id <> ''", name="cycle_id_present"),
+        CheckConstraint("detail <> ''", name="detail_present"),
+        # I2 on every halt: which commit, config, data version and seed observed
+        # the condition, and which observed the clearance.
+        CheckConstraint("git_commit ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'", name="git_commit_is_sha"),
+        CheckConstraint("config_hash ~ '^[0-9a-f]{64}$'", name="config_hash_is_sha256"),
+        CheckConstraint("data_version <> ''", name="data_version_present"),
+        CheckConstraint("seed >= 0", name="seed_non_negative"),
+    )
+
+    halt_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+        doc="Surrogate row key, database-generated. The id a clearance must name.",
+    )
+    event: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="'engaged' or 'cleared'. There is no third event: a halt is never amended in place.",
+    )
+    halt_trigger: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc=(
+            "Which condition fired, on an engagement; NULL on a clearance (CHECK, both "
+            "directions). One of the four the directive names plus 'unknown_condition', which "
+            "exists because a kill switch whose trigger list is exhaustive fails open on "
+            "everything not on the list."
+        ),
+    )
+    cycle_id: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "The execution cycle this row belongs to. On an engagement it is the cycle that "
+            "observed the condition — the column that makes 'halts within one cycle' "
+            "checkable from the log rather than only at the moment it happened."
+        ),
+    )
+    detail: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="Prose naming the condition or the clearance. Non-blank by CHECK.",
+    )
+    evidence: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        doc=(
+            "The measurements behind the decision, as JSON: the drawdown and the limit it "
+            "breached, the data age and the age allowed, the digests of the reconciliation "
+            "that failed. Structured rather than prose because a halt whose evidence is a "
+            "sentence cannot be audited without re-running what produced it."
+        ),
+    )
+    clears_halt_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("execution_halt.halt_id"),
+        nullable=True,
+        doc=(
+            "On a clearance, the engagement being cleared; NULL on an engagement. UNIQUE, so a "
+            "halt is cleared at most once and the log never holds two answers to 'who turned "
+            "it back on'."
+        ),
+    )
+    cleared_by: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="Who cleared the halt. Non-blank when present: a halt is cleared by a person.",
+    )
+    clearance_reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc=(
+            "Why it was cleared. Non-blank when present — 'the break was a stale statement' "
+            "and 'the alarm was inconvenient' are both reasons, and a log that cannot tell "
+            "them apart is worthless."
+        ),
+    )
+    occurred_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        doc=(
+            "When the condition was observed, or the clearance decided. UTC. Never an "
+            "ordering key — halt_id is."
+        ),
+    )
+    git_commit: Mapped[str] = mapped_column(
+        Text, nullable=False, doc="I2: full commit SHA of the run that wrote this row."
+    )
+    git_dirty: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        doc="I2: whether the working tree differed from HEAD, counting untracked files.",
+    )
+    data_version: Mapped[str] = mapped_column(
+        Text, nullable=False, doc="I2: identifier of the data snapshot in use."
+    )
+    config_hash: Mapped[str] = mapped_column(
+        Text, nullable=False, doc="I2: SHA-256 canonical config hash (64 lowercase hex)."
+    )
+    seed: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, doc="I2: the random seed, recorded verbatim. Dimensionless."
+    )
+    recorded_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc="When the row was written, UTC, from the database clock. Wall-clock provenance only.",
+    )
+
+
+class MonitoringAlert(Base):
+    """One alert condition, recorded before anyone is told about it (P12.4).
+
+    **The row is written before delivery is attempted.** If the process dies
+    mid-dispatch the alert exists and the missing delivery rows say nobody was
+    told; the reverse order loses the alert entirely on the same failure. That
+    ordering is the whole reason this table exists rather than a log line.
+
+    **Identity is the condition, not the occurrence.** :attr:`dedup_key` is a
+    SHA-256 over the rule and the condition — the date and the specific thing
+    that was wrong — and carries a ``UNIQUE`` constraint. A monitoring job that
+    runs hourly through an incident re-derives the same key every hour and the
+    database absorbs the repeats, so one condition produces one alert and one
+    acknowledgement. Nothing that changes between two evaluations of the same
+    condition (a timestamp, a counter, a UUID) is in the digest, for D-033's
+    reason: a counter has to be *remembered* across a restart, and the worker
+    that restarted mints a new one and pages someone twice.
+
+    **No delivered/acknowledged flags.** Both are derived from
+    ``monitoring_alert_delivery`` and ``monitoring_alert_acknowledgement``. A
+    denormalised flag on an append-only table cannot be updated, and one that
+    drifts from the rows it summarises is exactly the condition an audit trail
+    exists to prevent (same reasoning as ``execution_order``'s absent state
+    column, D-033).
+
+    Not bitemporal, matching revisions 0005, 0007, 0009-0011 and 0014: the
+    bitemporal columns describe when a fact was true in the world and when it
+    became knowable to the *market* (D-011). An alert is something **we**
+    observed about our own system; a ``knowledge_time`` invented for it would be
+    a fabricated value in the one column whose meaning is that it is not
+    fabricated (I3).
+
+    Units and assumptions:
+
+    - :attr:`severity` is ``'info'``, ``'warning'`` or ``'critical'``, bound by
+      CHECK, matching :class:`backend.monitoring.alerts.AlertSeverity`;
+    - :attr:`raised_at` is when the *condition* was observed and
+      :attr:`recorded_at` is when the row was written; they differ when a
+      monitoring run is replayed, and the first is the one an incident timeline
+      is built from;
+    - the four I2 stamp columns are the run that raised the alert, not the run
+      that stored it.
+    """
+
+    __tablename__ = "monitoring_alert"
+    __table_args__ = (
+        # One row per condition. Enforced by the database rather than by a
+        # look-then-insert in Python: two monitoring workers can both pass
+        # through the window between a check and an insert, and both would page
+        # the operator for one condition.
+        UniqueConstraint("dedup_key", name="uq_monitoring_alert_dedup_key"),
+        # CHECK names are unprefixed; the metadata naming convention expands
+        # them to ck_%(table_name)s_%(constraint_name)s, so an already-prefixed
+        # name would produce ck_..._ck_... and diverge from migration 0017.
+        CheckConstraint("severity IN ('info', 'warning', 'critical')", name="severity_known"),
+        CheckConstraint("dedup_key ~ '^[0-9a-f]{64}$'", name="dedup_key_is_digest"),
+        CheckConstraint("rule_id <> ''", name="rule_id_not_empty"),
+        CheckConstraint("subject <> ''", name="subject_not_empty"),
+        CheckConstraint("detail <> ''", name="detail_not_empty"),
+        CheckConstraint("git_commit ~ '^[0-9a-f]{40}([0-9a-f]{24})?$'", name="git_commit_is_sha"),
+        CheckConstraint("data_version <> ''", name="data_version_not_empty"),
+        CheckConstraint("config_hash ~ '^[0-9a-f]{64}$'", name="config_hash_is_sha256"),
+        CheckConstraint("seed >= 0", name="seed_non_negative"),
+    )
+
+    alert_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+        doc="Surrogate row key, database-generated. Dimensionless; also the raise order.",
+    )
+    dedup_key: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "64-character hex SHA-256 of the rule and the condition. The alert's identity: "
+            "a repeat of the same condition re-derives it and is absorbed by the UNIQUE "
+            "constraint. Never a counter — see the class docstring."
+        ),
+    )
+    rule_id: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="Which rule raised this, e.g. 'live_vs_expected'. Part of the dedup digest.",
+    )
+    severity: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="'info', 'warning' or 'critical'. Bound by CHECK to the AlertSeverity members.",
+    )
+    subject: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="One line, for a channel that has room for one line.",
+    )
+    detail: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="The full message including the numbers that produced the condition.",
+    )
+    payload: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        doc=(
+            "The machine-readable finding — typically the halt decision's or drift finding's "
+            "own to_dict(), band, disclosures and all — so the alert stands alone when the "
+            "objects that produced it are gone."
+        ),
+    )
+    raised_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        doc="UTC instant the CONDITION was observed. What an incident timeline is built from.",
+    )
+    git_commit: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="I2: commit of the monitoring run that raised the alert (40 or 64 hex characters).",
+    )
+    git_dirty: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        doc="I2: whether that run's working tree differed from its commit, untracked included.",
+    )
+    data_version: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="I2: identifier of the data snapshot the monitoring run read.",
+    )
+    config_hash: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="I2: SHA-256 of the run's canonical configuration (64 hex characters).",
+    )
+    seed: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        doc="I2: the run's random seed, recorded verbatim. Dimensionless.",
+    )
+    recorded_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc="When the row was written, UTC, from the database clock. Wall-clock provenance only.",
+    )
+
+
+class MonitoringAlertDelivery(Base):
+    """One attempt to hand one alert to one channel (P12.4).
+
+    Delivery is a **history**, not a flag. Every attempt is a row — the failures
+    especially — so "which alerts reached nobody" is a query rather than a
+    guess, and an alert that was persisted and never dispatched (no rows at all)
+    is distinguishable from one that was dispatched and refused (rows, all
+    failed). Those are different incidents: the first means the dispatcher died,
+    the second means the channel is down.
+
+    ``UNIQUE (alert_id, channel_id, attempt)`` makes the attempt counter
+    monotonic per channel and stops a retry from overwriting the record of the
+    attempt it is retrying.
+
+    A failed attempt must carry a detail (CHECK ``detail <> ''``): a failure
+    that does not say why cannot be acted on, and the operator response to "SMTP
+    refused the recipient" is not the response to "the credential expired".
+    """
+
+    __tablename__ = "monitoring_alert_delivery"
+    __table_args__ = (
+        UniqueConstraint(
+            "alert_id", "channel_id", "attempt", name="uq_monitoring_alert_delivery_attempt"
+        ),
+        CheckConstraint("outcome IN ('delivered', 'failed')", name="outcome_known"),
+        CheckConstraint("attempt >= 1", name="attempt_positive"),
+        CheckConstraint("channel_id <> ''", name="channel_id_not_empty"),
+        CheckConstraint("detail <> ''", name="detail_not_empty"),
+    )
+
+    delivery_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+        doc="Surrogate row key, database-generated. Dimensionless; also the attempt order.",
+    )
+    alert_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("monitoring_alert.alert_id", ondelete="RESTRICT"),
+        nullable=False,
+        doc="The alert this attempt was for.",
+    )
+    channel_id: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="Identifier of the delivery channel, e.g. 'structlog', 'pagerduty'.",
+    )
+    attempt: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="1-based attempt number for this (alert, channel) pair. Dimensionless count.",
+    )
+    outcome: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="'delivered' or 'failed'. Bound by CHECK to the DeliveryOutcome members.",
+    )
+    detail: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "The channel's receipt on success, or why it refused on failure. Never blank: a "
+            "failure that does not say why cannot be acted on."
+        ),
+    )
+    attempted_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        doc="UTC instant the attempt was made.",
+    )
+    recorded_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc="When the row was written, UTC, from the database clock. Wall-clock provenance only.",
+    )
+
+
+class MonitoringAlertAcknowledgement(Base):
+    """A person's signature on an alert (P12.4, §6.10).
+
+    One row per alert, enforced by ``UNIQUE (alert_id)``. An acknowledgement
+    records *who took responsibility*, so a second one is refused rather than
+    overwriting the first — silently replacing that name is worse than losing
+    it, because the record would still look complete.
+
+    :attr:`note` cannot be blank. An acknowledgement with no note is a click,
+    and the point of the record is that somebody looked at the alert and
+    concluded something. It is also the text
+    :func:`backend.monitoring.history.record_resume` shows the next operator
+    before trading restarts.
+    """
+
+    __tablename__ = "monitoring_alert_acknowledgement"
+    __table_args__ = (
+        UniqueConstraint("alert_id", name="uq_monitoring_alert_acknowledgement_alert"),
+        CheckConstraint("acknowledged_by <> ''", name="acknowledged_by_not_empty"),
+        CheckConstraint("note <> ''", name="note_not_empty"),
+    )
+
+    acknowledgement_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+        doc="Surrogate row key, database-generated. Dimensionless.",
+    )
+    alert_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("monitoring_alert.alert_id", ondelete="RESTRICT"),
+        nullable=False,
+        doc="The alert being acknowledged. UNIQUE: one signature per alert, never replaced.",
+    )
+    acknowledged_by: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "Who signed. Free text because this platform has no operator identity model yet; "
+            "never blank, because 'acknowledged by nobody' is not an acknowledgement."
+        ),
+    )
+    note: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="What they concluded. Never blank — see the class docstring.",
+    )
+    acknowledged_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        doc="UTC instant the alert was acknowledged.",
+    )
+    recorded_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc="When the row was written, UTC, from the database clock. Wall-clock provenance only.",
+    )
+
+
+class MonitoringHaltEvent(Base):
+    """One halt or resume in the trading halt history (P12.1/P12.4, §6.10).
+
+    **There is no halt-state column anywhere in this schema.** Current state is
+    derived: the earliest ``halt`` row that no ``resume`` row points at
+    (:func:`backend.monitoring.history.active_halt`). A stored flag on an
+    append-only table cannot be updated, and a flag that drifts from the history
+    explaining it is the single worst field this schema could contain — it is
+    the one an operator would trust most.
+
+    ``UNIQUE (resolves_halt_event_id)`` makes "resume the same halt twice"
+    impossible rather than merely checked, so the derived state can never be
+    ambiguous. The CHECKs bind the two row shapes: a halt carries a cause and
+    resolves nothing; a resume resolves exactly one halt, carries no cause, and
+    names the operator who took the decision.
+
+    :attr:`alert_dedup_key` links a halt to the alert it raised. That link is
+    what makes acknowledgement load-bearing:
+    :func:`backend.monitoring.history.record_resume` refuses to resume a halt
+    whose alert has no acknowledgement row, so an alerting pipeline nobody reads
+    cannot quietly become a formality.
+
+    :attr:`decision` stores the halting
+    :class:`~backend.monitoring.expectation.HaltDecision` payload verbatim — the
+    band, the CPCV artefact identity, the disclosures and the comparison — so
+    the history explains itself years later without the objects that produced
+    it. Not bitemporal, for the same reason as the other three tables here.
+    """
+
+    __tablename__ = "monitoring_halt_event"
+    __table_args__ = (
+        # One resume per halt. The derived state depends on this being a
+        # database fact rather than an application convention.
+        UniqueConstraint("resolves_halt_event_id", name="uq_monitoring_halt_event_resolves"),
+        CheckConstraint("kind IN ('halt', 'resume')", name="kind_known"),
+        CheckConstraint("detail <> ''", name="detail_not_empty"),
+        CheckConstraint("actor <> ''", name="actor_not_empty"),
+        # The two row shapes, stated in SQL so a writer that skips Python is
+        # still bound: a halt has a cause and resolves nothing; a resume
+        # resolves exactly one halt and carries no cause.
+        CheckConstraint(
+            "(kind = 'halt' AND cause IS NOT NULL AND resolves_halt_event_id IS NULL) "
+            "OR (kind = 'resume' AND cause IS NULL AND resolves_halt_event_id IS NOT NULL)",
+            name="shape_matches_kind",
+        ),
+        CheckConstraint(
+            "cause IS NULL OR cause IN ("
+            "'below_expected_band', 'above_expected_band', 'comparison_unavailable', "
+            "'stale_live_data', 'cost_basis', 'internal_error')",
+            name="cause_known",
+        ),
+        CheckConstraint("git_commit ~ '^[0-9a-f]{40}([0-9a-f]{24})?$'", name="git_commit_is_sha"),
+        CheckConstraint("data_version <> ''", name="data_version_not_empty"),
+        CheckConstraint("config_hash ~ '^[0-9a-f]{64}$'", name="config_hash_is_sha256"),
+        CheckConstraint("seed >= 0", name="seed_non_negative"),
+    )
+
+    halt_event_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+        doc="Surrogate row key, database-generated. Dimensionless; also the event order.",
+    )
+    kind: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="'halt' or 'resume'. Bound by CHECK; the two shapes differ, see the table args.",
+    )
+    cause: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc=(
+            "Why trading stopped, from backend.monitoring.expectation.HaltCause. NOT NULL on "
+            "a halt row and NULL on a resume, by CHECK. A distinct value per operator "
+            "response — 'comparison_unavailable' and 'below_expected_band' are not the same "
+            "incident."
+        ),
+    )
+    detail: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="The decision's own words on a halt; the operator's reason on a resume.",
+    )
+    actor: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "Who. 'auto:monitoring' for a monitor-raised halt, a person for a resume. Never "
+            "NULL: 'who halted trading' has an answer even when the answer is a scheduled job."
+        ),
+    )
+    occurred_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        doc="UTC instant of the decision (the halt decision's own timestamp, not the write).",
+    )
+    resolves_halt_event_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("monitoring_halt_event.halt_event_id", ondelete="RESTRICT"),
+        nullable=True,
+        doc="On a resume, the halt it clears. UNIQUE, so a halt is resumed at most once.",
+    )
+    alert_dedup_key: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc=(
+            "The alert this halt raised, when it raised one. Not a foreign key: an alert may "
+            "be absorbed as a repeat and this column records the condition, not the row. It "
+            "is what makes acknowledgement a precondition for resuming."
+        ),
+    )
+    decision: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        doc=(
+            "The halting HaltDecision.to_dict() verbatim — band, CPCV artefact identity, "
+            "disclosures, comparison — so the history explains itself without the objects "
+            "that produced it. NULL on a resume."
+        ),
+    )
+    git_commit: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="I2: commit of the run that wrote this row (40 or 64 hex characters).",
+    )
+    git_dirty: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        doc="I2: whether that run's working tree differed from its commit, untracked included.",
+    )
+    data_version: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="I2: identifier of the data snapshot behind the decision.",
+    )
+    config_hash: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="I2: SHA-256 of the run's canonical configuration (64 hex characters).",
+    )
+    seed: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        doc="I2: the run's random seed, recorded verbatim. Dimensionless.",
+    )
+    recorded_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc="When the row was written, UTC, from the database clock. Wall-clock provenance only.",
+    )

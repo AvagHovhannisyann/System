@@ -30,6 +30,23 @@ an order that was never recorded (:class:`OrderNotFoundError`), and a persisted
 row whose venue is not the paper venue (:class:`NotPaperOrderError` — see
 :mod:`backend.execution` for why that is a structural impossibility rather than
 a configuration mistake).
+
+Reconciliation and the halt log (P11.3, P11.5)
+-----------------------------------------------
+
+The second group of failures belongs to the controls rather than to the orders,
+and they fail in a third characteristic way: **silently deciding that everything
+is fine.** A reconciliation that cannot parse a snapshot, a tolerance widened
+until nothing trips it, a halt log that cannot be read — each of those has an
+obvious, comfortable, wrong answer ("nothing to report"), and each raises here
+instead. :class:`SnapshotValidationError`, :class:`ReconciliationMismatchError`
+and :class:`ReconciliationReplayError` cover the comparison;
+:class:`SystemHaltedError`, :class:`HaltStateUnavailableError`,
+:class:`HaltAlreadyClearedError` and :class:`HaltClearanceError` cover the halt.
+
+:class:`HaltStateUnavailableError` is the one worth reading twice. It exists so
+that "I could not determine whether I am halted" is a *refusal to trade* rather
+than an exception a caller might mistake for an empty result.
 """
 
 from __future__ import annotations
@@ -37,6 +54,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from backend.execution.lifecycle import OrderEvent, OrderState
 
 __all__ = [
@@ -44,11 +63,18 @@ __all__ = [
     "DuplicateOrderError",
     "ExecutionError",
     "FillAccountingError",
+    "HaltAlreadyClearedError",
+    "HaltClearanceError",
+    "HaltStateUnavailableError",
     "IdempotencyCollisionError",
     "IllegalTransitionError",
     "NotPaperOrderError",
     "OrderNotFoundError",
     "OrderValidationError",
+    "ReconciliationMismatchError",
+    "ReconciliationReplayError",
+    "SnapshotValidationError",
+    "SystemHaltedError",
     "TerminalOrderError",
     "TransitionChainError",
 ]
@@ -352,3 +378,151 @@ class NotPaperOrderError(ExecutionError, RuntimeError):
             f"is no configuration that produces a non-paper order, so this row did not come "
             f"from this system. Refusing to load it"
         )
+
+
+class SnapshotValidationError(ExecutionError, ValueError):
+    """Raised when a position/cash snapshot cannot be trusted as an observation.
+
+    Covers a snapshot whose cash is non-finite or carries more precision than the
+    schema can hold, a share count that is not a whole number, a naive timestamp,
+    an origin on the wrong side of the comparison, a tolerance outside its bounds,
+    two snapshots too far apart in time to describe one book, and a stored payload
+    that cannot be rebuilt.
+
+    Every one of those has a tempting silent alternative — coerce the ``NaN``,
+    round the cash, assume UTC, widen the tolerance, interpret half the payload —
+    and each of them produces a *clean* reconciliation over a book that was never
+    checked. Raising means the cycle gets no verdict, and a cycle with no verdict
+    is an unknown condition the kill switch halts on
+    (:mod:`backend.execution.killswitch`). Failing towards a halt is the whole
+    design.
+
+    Subclasses :class:`ValueError` so ordinary caller-side validation keeps
+    working.
+    """
+
+
+class ReconciliationMismatchError(ExecutionError, RuntimeError):
+    """Raised by :func:`backend.execution.reconciliation.require_matched` on a break.
+
+    The explicit form of "a mismatch halts", for a caller that wants the cycle to
+    stop at the reconciliation step rather than continue and let the kill switch
+    record it. The kill switch itself does **not** use this: a halt has to be
+    persisted, and an exception is not a halt — it does not survive the process
+    that raised it.
+
+    Attributes:
+        cycle_id: the cycle whose reconciliation failed.
+        break_count: how many findings were breaks.
+        result_digest: the verdict's digest, so the stored row that carries the
+            same digest can be found and re-run.
+        detail: the concatenated prose of every break.
+    """
+
+    def __init__(self, *, cycle_id: str, break_count: int, result_digest: str, detail: str) -> None:
+        """Build the error from the cycle, the break count, the digest and the prose."""
+        self.cycle_id = cycle_id
+        self.break_count = break_count
+        self.result_digest = result_digest
+        self.detail = detail
+        super().__init__(
+            f"reconciliation for cycle {cycle_id!r} found {break_count} break(s) "
+            f"(result_digest={result_digest}): {detail}"
+        )
+
+
+class ReconciliationReplayError(ExecutionError, ValueError):
+    """Raised when a stored reconciliation cannot be found or does not re-derive.
+
+    A break that cannot be re-examined afterwards cannot be investigated, so the
+    stored row holds both snapshots and the verdict's digest, and
+    :func:`backend.execution.reconciliation.rerun` recomputes the second from the
+    first. A digest that moves means either the stored payload or the comparison
+    changed since the verdict was recorded, and neither of those may be presented
+    as the original finding — the re-derived answer would look like history and
+    would not be.
+    """
+
+
+class SystemHaltedError(ExecutionError, RuntimeError):
+    """Raised by the release guard when any halt is open.
+
+    Trading is stopped and stays stopped until a human clears the halt by id
+    (:func:`backend.execution.halt.clear_halt`). There is no timeout and no
+    automatic re-arm: a halt survives the condition that caused it, because the
+    point of halting is that somebody looks.
+
+    Attributes:
+        halt_ids: the open engagements' ids, ascending. These are the ids a
+            clearance must name — the error carries them so an operator does not
+            have to go looking.
+        triggers: the trigger of each open halt, in the same order.
+        detail: the prose recorded with each.
+    """
+
+    def __init__(self, *, halt_ids: Sequence[int], triggers: Sequence[str], detail: str) -> None:
+        """Build the error from the open halts' ids, triggers and prose."""
+        self.halt_ids = tuple(halt_ids)
+        self.triggers = tuple(triggers)
+        self.detail = detail
+        super().__init__(
+            f"trading is halted by {len(self.halt_ids)} open halt(s) "
+            f"{list(self.halt_ids)} ({', '.join(self.triggers)}): {detail}. A halt is cleared "
+            f"only by an explicit, attributed clearance naming the halt id"
+        )
+
+
+class HaltStateUnavailableError(ExecutionError, RuntimeError):
+    """Raised when whether the system is halted cannot be determined.
+
+    This is the fail-closed error, and it is deliberately not an empty result. "I
+    could not read the halt log" and "there are no halts" are different facts, and
+    only the second permits trading; returning the first as the second would let a
+    database outage do what no operator is allowed to do — silently re-enable a
+    halted system.
+
+    Also raised when the log holds a trigger that names no known condition.
+    Guessing what it meant is how a halt gets cleared by mistake.
+    """
+
+
+class HaltAlreadyClearedError(ExecutionError, RuntimeError):
+    """Raised when a halt has already been cleared by someone else.
+
+    Not corruption and not retryable — the halt *is* cleared, and the caller's
+    clearance is simply not the one that did it. The condition arrives by either
+    of two routes carrying one SQLSTATE (``23505``): the unique index on
+    ``clears_halt_id``, or the clearance guard seeing a committed clearance the
+    caller's own earlier read did not (D-034 — under ``READ COMMITTED`` a
+    ``BEFORE INSERT`` trigger takes a fresh snapshot and fires ahead of the index).
+
+    Attributes:
+        halt_id: the engagement the caller tried to clear.
+    """
+
+    def __init__(self, *, halt_id: int) -> None:
+        """Build the error from the halt that was already cleared."""
+        self.halt_id = halt_id
+        super().__init__(
+            f"halt_id={halt_id} has already been cleared by another clearance. The halt is "
+            f"cleared; this attempt is not the one that cleared it, and a second clearance "
+            f"row would leave the log with two answers to 'who turned it back on'"
+        )
+
+
+class HaltClearanceError(ExecutionError, ValueError):
+    """Raised when a clearance is unattributed or names something that is not a halt.
+
+    Two cases, both refusals rather than normalisations:
+
+    - **Unattributed.** A blank ``cleared_by`` or ``clearance_reason``. The
+      asymmetry with :class:`~backend.execution.killswitch.ManualHaltRequest` —
+      which normalises blanks rather than raising, so an operator's halt can never
+      be refused over a format check — is the design: recording a halt must never
+      fail, and removing one must never be casual.
+    - **Not an open engagement.** The named row does not exist, or is itself a
+      clearance. Refused by the ``execution_halt_clearance_guard`` trigger under
+      SQLSTATE ``P0001``, which is kept distinct from ``23505`` because retrying
+      it would loop forever (D-034, and the same split migration 0014 makes
+      between a taken sequence position and a gap).
+    """

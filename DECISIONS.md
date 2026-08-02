@@ -1089,3 +1089,54 @@ tracks**; a scan over file text cannot distinguish a rule from a description of 
 `edgar_filing` reach their chunks. 0015 re-issues a grant per hypertable *by name* precisely
 because the `ALL TABLES` form may not propagate, but no Timescale instance was reachable.
 The integration suite's insert-and-read test is what will confirm it.
+
+## D-037 — Reconciliation tolerances are derived, and nothing may refuse a halt (P11.3/P11.5, 2026-08-02)
+
+**Cash tolerance: 1 US cent, absolute — derived, not chosen.** The only legitimate
+divergence between two correctly-maintained USD balances is representation: a statement
+renders at 2 dp while our balance is carried at scale 6, and quantising scale-6 to scale-2
+moves a value by at most **half a cent**. One cent is two quantisation ticks. The
+load-bearing half is the second one: the tolerance is *smaller than the smallest real
+break* — the cheapest thing that can actually go wrong (a commission, one share of any name
+a price screen admits, a dropped fill) is larger by orders of magnitude. A tolerance that
+cannot be exceeded by rounding and cannot absorb a real error is doing its whole job.
+
+**Positions: zero tolerance, and no parameter through which to widen it.** Share counts are
+integers compared with `==`. No arithmetic legitimately produces an off-by-one share, so a
+quantity tolerance could only ever hide a break. That asymmetry with cash is exactly why they
+are not one knob.
+
+**The tolerance itself has a ceiling** (5 cents = ten ticks), restated as a CHECK in
+migration 0016 so no Python can waive it. Tightening to zero is always allowed; widening past
+the point where the derivation holds is refused by the database.
+
+**Contemporaneity: 300 seconds**, because the mirror failure of a too-wide tolerance is a
+comparison that *manufactures* breaks. A "mismatch" that means "a fill landed in the gap" is
+how a real alarm gets ignored. Snapshots further apart yield **no verdict**, and a cycle with
+no verdict is an unknown condition the kill switch halts on — failing towards a halt.
+
+**Four mismatch kinds, because the operational response differs.** Shares the venue holds
+and we do not is the most serious: capital at the venue that the risk model, optimizer and
+drawdown monitor do not know exists. Its converse is serious *differently* — no unmanaged
+capital, but our books overstate the account and the next order can instruct a sale of shares
+that are not there. And "both flat, one side silent" is **not a break but is recorded
+anyway**: an explicit zero is a statement, an absence is silence, and coercing absence to zero
+makes a truncated statement indistinguishable from a confirmed flat book.
+
+**The halt log is deliberately asymmetric: nothing may refuse an engagement.** `evaluate` is
+pure and never raises — each probe's exception becomes `UNKNOWN_CONDITION`, which exists as a
+fifth trigger precisely because an exhaustive trigger list fails open on everything not on
+it. Halting is the default; *not* halting must be earned by four well-formed, in-limit
+measurements. A missing measurement halts. An unconfigured limit halts — "no limit set" is
+not "no limit". A `Decimal("NaN")` halts, because it compares false against every threshold,
+which is the textbook fail-open. `engage_halt` has no pre-read, no savepoint and no
+uniqueness check. Only *clearances* are constrained: explicit, attributed, by id, at most
+once. And `assert_not_halted` raises if the log cannot be **read** — a database outage must
+not do what no operator is permitted to do.
+
+**A tolerance-shaped lesson about the tests themselves.** An aborted mutation run left
+`MAX_SNAPSHOT_SKEW_SECONDS = 10**9` in the tree and the suite did not notice, because the
+skew tests were written *relative to the constant*. A test that derives its expectation from
+the value under test cannot detect that value being wrong — the same shape as D-027's sign
+inversion, which survived its own unit tests for the same reason. All three thresholds are
+now asserted as literals.
