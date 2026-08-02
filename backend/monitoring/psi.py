@@ -789,6 +789,19 @@ class ReferenceDistribution:
 
         if edges is None:
             requested = minimum_sample_size(n_bins)
+            if n_bins < MINIMUM_BINS:
+                # Checked here rather than only in __post_init__, where the same
+                # partition would be refused with a message about mass points.
+                # Asking for three quantile bins is a caller's choice, not a
+                # property of the data, and a diagnostic that blames the data
+                # sends the reader looking in the wrong place.
+                msg = (
+                    f"n_bins={n_bins} is below the minimum of {MINIMUM_BINS}. Fewer than "
+                    f"{MINIMUM_BINS} bins describe a location rather than a shape, and a "
+                    f"distribution can move substantially while leaving every bin fraction "
+                    f"almost unchanged."
+                )
+                raise ReferenceDistributionError(msg)
             if present.size < requested:
                 msg = (
                     f"reference {reference_id!r} for feature {feature!r} holds "
@@ -929,8 +942,17 @@ class PSIResult:
 
     @property
     def floor_contribution(self) -> float:
-        """PSI supplied by floored bins (dimensionless, part of :attr:`value`)."""
-        return sum(contribution.contribution for contribution in self.bins if contribution.floored)
+        """PSI supplied by floored bins (dimensionless, part of :attr:`value`).
+
+        Always a ``float``, including when no bin was floored. A bare ``sum()``
+        over an empty selection returns the integer ``0``, which serialises to
+        ``0`` rather than ``0.0`` in :meth:`to_dict` and would make a dashboard
+        column change type between dates — the sort of difference a JSON
+        consumer notices and a reader does not.
+        """
+        return math.fsum(
+            contribution.contribution for contribution in self.bins if contribution.floored
+        )
 
     @property
     def observed_fractions(self) -> tuple[float, ...]:

@@ -830,3 +830,38 @@ if a retraction instance is ever loaded, whatever query produced it.
 **The downgrade refuses to run if any retraction row exists.** The pre-0012 schema cannot
 represent one without a fabricated payload, and inventing values so a downgrade can succeed
 is precisely the behaviour this revision removes.
+
+## D-031 — Drift reporting: bands are data, refusals are rows, and NaN is its own axis (P12.2, 2026-08-02)
+
+**PSI's classic silent failure, demonstrated rather than asserted.** If the quantile bins are
+recomputed from each period's own distribution instead of being fixed at reference time, PSI
+is not merely attenuated — it is **identically 0.0 at a fifty-sigma shift**. Measured:
+`shift=0.5, 1.0, 2.0, 50.0 → PSI = 0.0000000000` in every case. A detector built that way
+reports perfect health forever, and nothing about its output looks wrong. The broken
+implementation is kept permanently in the test file, asserted to return exactly 0.0, plus a
+structural AST test that no public callable accepts two array-like samples — which is the
+shape that would let a caller supply both distributions and reintroduce it.
+
+**The 0.1 / 0.25 bands are convention, and the type system says so.** They live in
+`drift.py` as a validated, replaceable `DriftBands` ladder carrying a mandatory `basis`
+field, never as literals in the detector. They are folklore from credit scoring, not
+derived, and a threshold whose provenance is a magic number in a comparison is one nobody
+will revisit.
+
+**A feature that cannot be measured becomes a row, not a gap.** `UnmeasurableFeature` has
+**no renderable numeric attribute** — it cannot be accidentally charted as zero — and the
+report's `complete` flag goes false. The alternative, dropping refused features, makes a
+monitoring dashboard that is silently blind to exactly the features whose data broke.
+Mutating the report to swallow refusals and claim completeness fails 5 tests.
+
+**NaN rate is measured as its own two-category PSI, never summed into the distributional
+value.** A change in availability usually means an upstream source broke — the most
+important drift there is — and averaging it into a distributional number hides it. The
+decisive fixture draws survivors from the reference distribution itself: distribution PSI
+**0.0065** (correctly stable) while availability PSI is **5.364** at a 40-point rate change.
+An implementation that dropped NaNs reports that fixture as perfectly healthy.
+
+**Caller error and data condition are different exits.** `MonitoringInputError` propagates
+out of `drift_report`; `InsufficientSampleError` becomes a row. And the refusal is
+deliberately *not* a `ValueError` — asserted by test — so a stray `except ValueError`
+cannot swallow it.
