@@ -200,7 +200,7 @@ async def test_concurrent_reservations_across_providers_do_not_share_a_budget() 
         return True
 
     results = await asyncio.gather(attempt(Provider.ANTHROPIC), attempt(Provider.OPENAI))
-    assert results == [True, True]
+    assert list(results) == [True, True]
 
 
 # --------------------------------------------------------------------------
@@ -305,7 +305,10 @@ async def test_settling_a_released_reservation_is_refused() -> None:
 
     with pytest.raises(LedgerIntegrityError, match="already released"):
         await ledger.settle(
-            reservation, actual=None, input_tokens=None, output_tokens=None,
+            reservation,
+            actual=None,
+            input_tokens=None,
+            output_tokens=None,
             outcome=CallOutcome.FAILED,
         )
 

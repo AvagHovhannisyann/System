@@ -138,7 +138,7 @@ async def test_concurrent_governed_calls_send_exactly_the_number_the_cap_allows(
     """
     inner = RecordingClient(delay=True, input_tokens=None, output_tokens=None)
     call = request(prompt="p" * 100, system="", max_tokens=1000)
-    # One call's upper bound is USD 0.1011; three fit under USD 0.35, four do not.
+    # One call's upper bound is USD 0.11124; three fit under USD 0.35, four do not.
     client, governor, ledger = _governed(inner, daily="0.35", monthly="100.00")
 
     async def attempt() -> bool:

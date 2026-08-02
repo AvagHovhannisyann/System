@@ -865,3 +865,49 @@ An implementation that dropped NaNs reports that fixture as perfectly healthy.
 out of `drift_report`; `InsufficientSampleError` becomes a row. And the refusal is
 deliberately *not* a `ValueError` — asserted by test — so a stray `except ValueError`
 cannot swallow it.
+
+## D-032 — The cost governor is a client decorator, and there is no `check()` to forget (P7.7, 2026-08-02)
+
+**Enforcement is a `ModelClient` decorator whose inner client is a private attribute**, so
+no reachable path to a provider skips `authorize()`. The alternative — a
+`governor.check()` the pipeline calls first — is identical when written correctly and one
+refactor away from a call site that no longer checks. Consequence worth noting:
+`ExtractionPipeline` already takes a client, so handing it a governed one governs every
+chunk of every document with **zero edits** to `backend/extraction/tasks/`. Governance sits
+behind the cache, so a hit spends nothing.
+
+**The concurrency answer is that the unsafe operation does not exist.** There is no `check`
+on the ledger interface. `reserve()` reads committed spend, compares both windows, and
+writes the reservation as one atomic step, returning a reservation or raising. A caller
+cannot use it wrongly by forgetting to hold something, because there is nothing to hold.
+Postgres takes `pg_advisory_xact_lock(provider)` **before** the read, in the transaction
+that writes — a lock around the write alone still lets two transactions read the same
+headroom, and a test asserts the statement ordering.
+
+*Sharp detail:* the in-memory ledger's critical section contains a deliberate cooperative
+yield, placed where Postgres does its round trip. Without it the coroutine would be
+**accidentally atomic**, the lock would be untestable, and deleting the lock would pass
+every test.
+
+**The estimate is an upper bound, and reconciliation is what makes that affordable.**
+Output is `max_tokens` (exact — the provider cannot exceed the request's own cap). Input is
+UTF-8 byte length plus a declared framing margin: byte-level BPE tokens each cover ≥1 byte,
+so byte count dominates any token count. It over-states ~4x, and that pessimism is returned
+to the window at settlement rather than shaved by a fudge factor — a ratio-based estimate
+would be right on average and wrong on exactly the token-dense inputs that cost the most.
+
+**A failed call settles at the bound; it does not release.** Nothing observable says whether
+the request left the host. Over-counting refuses calls that would have fit; under-counting
+lets real money out. The asymmetry is deliberate and documented rather than left to
+inference.
+
+**Degradation is per provider and must be strictly cheaper for *this call*** — whole-call
+estimates, not headline rates, since a lower output rate can still lose on a long prompt.
+Cross-provider degradation is refused at construction: it spends a different budget under a
+different credential and sends the document to a different vendor. That is a configuration
+change, not a degradation. Halt forbids a target, because a fallback that can never fire
+reads as protection that does not exist.
+
+**I3 on prices:** `CATALOG_PRICES` is an explicitly empty mapping and every lookup raises
+`ModelPriceUnknownError`. There is no average, no cheapest-configured, no zero fallback — a
+cap enforced against a made-up price enforces nothing.

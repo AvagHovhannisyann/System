@@ -179,9 +179,9 @@ def test_actual_cost_uses_provider_reported_counts() -> None:
     response = ModelResponse(text="{}", model=PRIMARY_MODEL, input_tokens=100, output_tokens=50)
     actual = actual_call_cost(response, price(input_rate="10.00", output_rate="100.00"))
 
-    expected = (
-        Decimal(100) * Decimal("10.00") + Decimal(50) * Decimal("100.00")
-    ) / Decimal(TOKENS_PER_PRICE_UNIT)
+    expected = (Decimal(100) * Decimal("10.00") + Decimal(50) * Decimal("100.00")) / Decimal(
+        TOKENS_PER_PRICE_UNIT
+    )
     assert actual == Money(expected.quantize(Decimal(1).scaleb(-MONEY_DECIMAL_PLACES)), "USD")
 
 

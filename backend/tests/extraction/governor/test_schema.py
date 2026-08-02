@@ -18,10 +18,9 @@ from __future__ import annotations
 
 import importlib
 import inspect
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Protocol, cast
 
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
 from backend.db.models import PROVIDER_NAMES_SQL, LlmSpendLedger
 from backend.extraction.governor.caps import SpendWindow
@@ -33,14 +32,39 @@ from backend.extraction.governor.postgres import (
 from backend.extraction.providers.catalog import Provider
 
 if TYPE_CHECKING:
-    from types import ModuleType
+    from collections.abc import Callable
 
 _MIGRATION = "0013_llm_spend_ledger"
 
 
-def _load() -> ModuleType:
+class _MigrationModule(Protocol):
+    """The parts of a migration revision this file reads.
+
+    A protocol rather than ``ModuleType`` so the attributes are named and typed:
+    ``importlib`` returns an untyped module, and reading ``revision`` off it
+    would otherwise be unchecked.
+    """
+
+    revision: str
+    down_revision: str | None
+    op: object
+    upgrade: Callable[[], None]
+    _PROVIDER_NAMES_SQL: str
+
+
+def _load() -> _MigrationModule:
     """Import the migration module by its revision file name."""
-    return importlib.import_module(f"backend.db.migrations.versions.{_MIGRATION}")
+    return cast(
+        "_MigrationModule",
+        importlib.import_module(f"backend.db.migrations.versions.{_MIGRATION}"),
+    )
+
+
+def _table() -> sa.Table:
+    """Return the ORM table for the spend ledger."""
+    table = LlmSpendLedger.__table__
+    assert isinstance(table, sa.Table)
+    return table
 
 
 class _RecordingOp:
@@ -54,19 +78,19 @@ class _RecordingOp:
 
     def __init__(self) -> None:
         """Start with nothing recorded."""
-        self.tables: dict[str, tuple[Any, ...]] = {}
+        self.tables: dict[str, tuple[sa.schema.SchemaItem, ...]] = {}
         self.indexes: list[tuple[str, str, tuple[str, ...]]] = []
         self.statements: list[str] = []
 
-    def create_table(self, name: str, *elements: Any) -> None:
+    def create_table(self, name: str, *elements: sa.schema.SchemaItem) -> None:
         """Record a table declaration."""
         self.tables[name] = elements
 
-    def create_index(self, name: str, table: str, columns: list[str], **_: Any) -> None:
+    def create_index(self, name: str, table: str, columns: list[str], **_: object) -> None:
         """Record an index declaration."""
         self.indexes.append((name, table, tuple(columns)))
 
-    def execute(self, statement: Any) -> None:
+    def execute(self, statement: object) -> None:
         """Record raw SQL."""
         self.statements.append(str(statement))
 
@@ -103,10 +127,8 @@ def test_0013_follows_0012() -> None:
 def test_the_migration_declares_exactly_the_orm_columns_with_the_same_types() -> None:
     """Two independent statements of one schema; drift fails here, not in production."""
     elements = _declared().tables["llm_spend_ledger"]
-    declared = {
-        element.name: element for element in elements if isinstance(element, sa.Column)
-    }
-    mapped = {column.name: column for column in LlmSpendLedger.__table__.columns}
+    declared = {element.name: element for element in elements if isinstance(element, sa.Column)}
+    mapped = {column.name: column for column in _table().columns}
 
     assert set(declared) == set(mapped)
     for name, column in mapped.items():
@@ -119,14 +141,14 @@ def test_the_migration_and_the_orm_declare_the_same_named_constraints() -> None:
     declared_checks = {
         element.name for element in elements if isinstance(element, sa.CheckConstraint)
     }
+    # The ORM metadata naming convention expands unprefixed CHECK names, so the
+    # comparison is made on the unprefixed form the two files actually spell.
     mapped_checks = {
         constraint.name
-        for constraint in LlmSpendLedger.__table__.constraints
-        if isinstance(constraint, sa.CheckConstraint)
-        # The ORM metadata naming convention expands unprefixed CHECK names;
-        # compare on the unprefixed form the two files actually spell.
+        for constraint in _table().constraints
+        if isinstance(constraint, sa.CheckConstraint) and isinstance(constraint.name, str)
     }
-    unprefixed = {name.removeprefix("ck_llm_spend_ledger_") for name in mapped_checks if name}
+    unprefixed = {name.removeprefix("ck_llm_spend_ledger_") for name in mapped_checks}
 
     assert declared_checks == unprefixed
     assert "delta_matches_event" in declared_checks
@@ -137,14 +159,15 @@ def test_the_migration_and_the_orm_declare_the_same_named_constraints() -> None:
 def test_a_reservation_may_be_settled_or_released_only_once_in_the_schema() -> None:
     """The application refuses it too; this is the half that holds across processes."""
     elements = _declared().tables["llm_spend_ledger"]
-    uniques = {
-        element.name: tuple(element.columns.keys())
-        for element in elements
-        if isinstance(element, sa.UniqueConstraint)
+    declared = {element.name for element in elements if isinstance(element, sa.UniqueConstraint)}
+    mapped = {
+        constraint.name: tuple(constraint.columns.keys())
+        for constraint in _table().constraints
+        if isinstance(constraint, sa.UniqueConstraint)
     }
-    assert uniques == {
-        "uq_llm_spend_ledger_reservation_event": ("reservation_id", "event")
-    }
+
+    assert declared == set(mapped)
+    assert mapped["uq_llm_spend_ledger_reservation_event"] == ("reservation_id", "event")
 
 
 def test_the_window_lookups_are_indexed() -> None:
@@ -179,7 +202,7 @@ def test_the_committed_total_is_scoped_to_one_provider_and_one_window() -> None:
     """A sum that leaked across providers or days would be a cap over the wrong thing."""
     compiled = str(
         committed_statement(Provider.ANTHROPIC, SpendWindow.DAILY, "2026-08-02").compile(
-            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+            compile_kwargs={"literal_binds": True}
         )
     )
     assert "sum(llm_spend_ledger.delta_amount)" in compiled
@@ -191,7 +214,7 @@ def test_the_committed_total_is_scoped_to_one_provider_and_one_window() -> None:
 def test_the_monthly_total_reads_the_monthly_column() -> None:
     compiled = str(
         committed_statement(Provider.OPENAI, SpendWindow.MONTHLY, "2026-08").compile(
-            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+            compile_kwargs={"literal_binds": True}
         )
     )
     assert "llm_spend_ledger.monthly_window = '2026-08'" in compiled
