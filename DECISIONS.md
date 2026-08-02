@@ -789,3 +789,44 @@ observations with missing payloads, which is the same class of defect pointing t
 way and harder to notice, because an absent number reads as a gap rather than as a lie.
 Enforced at the database, so it holds on every role, session and write path — ORM, raw
 `INSERT`, or `COPY` — not only where application code remembers to check.
+
+### D-030 addendum — the rejected alternatives, and why SQL NULL is not Python None
+
+Recorded after the fact: the track's own reasoning arrived after the constraint work was
+verified and committed, and it is the part worth keeping.
+
+**Sentinel value (`-1`, `NaN`, `0`) — rejected outright, and it is the tempting one.** It
+*is* fabricated data by construction: a number in a numeric column, so `AVG(close_usd)`
+consumes it and a leaked retraction hands a caller something that reads as a quote. Worse,
+the sentinel must be chosen per column, and each choice is a fresh chance to pick a legal
+value — `0` is a legal volume, `-1` a legal return, `1` a legal adjustment factor. It fails
+I3 in the same breath it claims to serve it.
+
+**Nullable payloads with `Mapped[Decimal | None]` throughout — rejected on the read
+contract, not on effort.** Same storage shape. But the as-of layer masks retractions, so no
+caller can obtain a row with a NULL payload; spreading `| None` would demand a `None` check
+at every use site for a state that path cannot produce, and *checks that can never fire are
+how real ones stop being read*.
+
+**Separate retraction table — rejected on the versioned read.** A retraction must *compete*
+in the latest-knowledge ordering: beat an earlier observation, lose to a later re-assertion.
+So the read would UNION the two tables back into one stream and re-split them — this design
+with a worse plan, a primary key split where no single constraint makes latest-wins
+deterministic, and P2.9's chunk exclusion fragmented across an anti-join.
+
+**`retract_fact` writes `sqlalchemy.null()`, not Python `None`, and the difference is the
+whole point.** `macro_observation.is_missing` carries a `false` server default. An *unset*
+attribute makes SQLAlchemy omit the column from the INSERT, so the default fills it in — and
+the row ends up asserting `is_missing = false` about a fact nobody observed, reintroducing
+exactly the fabricated claim this decision removes. Explicit SQL NULL is what actually
+stores an absence.
+
+**Two further enforcement points beyond the CHECKs**, so the guarantee does not rest on the
+schema alone: `_assert_retraction_mask` re-derives from the *rewritten* statement that every
+path to a fact table sits under a `NOT is_retraction` scope (swept offline against P2.12's
+shape algebra — 3,064 shapes, zero false positives), and `_refuse_loaded_retraction` raises
+if a retraction instance is ever loaded, whatever query produced it.
+
+**The downgrade refuses to run if any retraction row exists.** The pre-0012 schema cannot
+represent one without a fabricated payload, and inventing values so a downgrade can succeed
+is precisely the behaviour this revision removes.
