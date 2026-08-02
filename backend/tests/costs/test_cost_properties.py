@@ -35,6 +35,7 @@ arithmetic happens.
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import replace
 
 import pytest
@@ -540,9 +541,17 @@ def test_a_short_exceeds_the_identical_long_by_exactly_the_borrow_term(
             borrow_rate_bps_per_year=params.borrow_rate_bps_per_year, holding_period_days=days
         )
     )
-    assert short_cost.total_bps - long_cost.total_bps == pytest.approx(
-        short_cost.borrow_bps, rel=1e-9, abs=1e-12
-    )
+    # The tolerance scales with the TOTALS being differenced, not with the borrow
+    # term, because that is where the precision is actually lost. Hypothesis found
+    # the case: $1.45bn against $100k of ADV is 14,513x participation, so impact is
+    # ~65,556 bps while borrow at 1 bp/year for one day is 0.00278 bps. Two floats
+    # near 65,556 are ~1.5e-11 apart at best, so the difference cannot resolve the
+    # borrow term to 1e-12 no matter how correct the arithmetic is. Judging a
+    # cancellation by the size of the small operand asserts something about IEEE-754
+    # rather than about the cost model.
+    difference = short_cost.total_bps - long_cost.total_bps
+    scale = max(abs(short_cost.total_bps), abs(long_cost.total_bps), 1.0)
+    assert abs(difference - short_cost.borrow_bps) <= 8 * sys.float_info.epsilon * scale
     assert (long_cost.half_spread_bps, long_cost.commission_bps, long_cost.impact_bps) == (
         short_cost.half_spread_bps,
         short_cost.commission_bps,
