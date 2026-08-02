@@ -20,13 +20,18 @@ import re
 from decimal import Decimal
 from pathlib import Path
 from types import ModuleType
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
+import pytest
 import sqlalchemy as sa
 
 from backend.db import models
 from backend.execution.halt import HaltEventKind, HaltTrigger
 from backend.execution.reconciliation import MAX_CASH_TOLERANCE_USD, SnapshotOrigin
+from backend.tests.integration import test_reconciliation as integration
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 _RECONCILIATION_TABLE = cast("sa.Table", models.ExecutionReconciliation.__table__)
 _HALT_TABLE = cast("sa.Table", models.ExecutionHalt.__table__)
@@ -249,11 +254,30 @@ def test_a_clearance_points_at_an_earlier_row_of_the_same_table() -> None:
     assert '"execution_halt.halt_id"' in _source()
 
 
-def test_the_clearance_columns_arrive_together_or_not_at_all() -> None:
+def test_each_clearance_column_is_tied_to_the_event_on_its_own() -> None:
+    # Stated per column, not over their conjunction.
+    #
+    # The first version read `(event = 'cleared') = (a IS NOT NULL AND b IS NOT
+    # NULL AND c IS NOT NULL)`, which only refuses an engagement carrying all
+    # three. A stray clears_halt_id alone was accepted — and because
+    # uq_execution_halt_clears_halt_id is on the column unconditionally, that row
+    # consumed the unique slot for the halt it named, so the genuine clearance was
+    # refused as "already cleared" while open_halts kept reporting the halt open.
+    # Permanently un-clearable, with an error that misdescribed why.
     text = _check(_HALT_TABLE, "ck_execution_halt_clearance_fields_iff_cleared")
     for column in ("clears_halt_id", "cleared_by", "clearance_reason"):
-        assert f"{column} IS NOT NULL" in text, column
-    assert "event = 'cleared'" in text
+        assert f"(event = 'cleared') = ({column} IS NOT NULL)" in text, column
+    # The conjunction form must not come back: it would satisfy the loop above
+    # only if each column also appeared in its own biconditional, but pinning the
+    # count keeps the expression from growing a weaker extra clause.
+    assert text.count("(event = 'cleared') = (") == 3
+    assert "IS NOT NULL AND" not in text
+
+
+def test_the_clearance_rule_is_stated_identically_in_the_revision() -> None:
+    squashed = _squashed()
+    for column in ("clears_halt_id", "cleared_by", "clearance_reason"):
+        assert f"(event = 'cleared') = ({column} IS NOT NULL)" in squashed, column
 
 
 def test_the_open_halt_index_covers_exactly_the_engagements() -> None:
@@ -276,3 +300,79 @@ def test_the_downgrade_drops_everything_the_upgrade_created() -> None:
         assert statement in source
     assert 'op.drop_table("execution_halt")' in source
     assert 'op.drop_table("execution_reconciliation")' in source
+
+
+# ---------------------------------------------------------------------------
+# Probe isolation, checkable without a database.
+# ---------------------------------------------------------------------------
+
+
+def _checks_of(table: sa.Table) -> dict[str, str]:
+    """Return every CHECK on ``table`` as unprefixed name to SQL text."""
+    return {
+        str(constraint.name).removeprefix(f"ck_{table.name}_"): str(constraint.sqltext)
+        for constraint in table.constraints
+        if isinstance(constraint, sa.CheckConstraint)
+    }
+
+
+def _mentioning(checks: dict[str, str], columns: Iterable[str]) -> set[str]:
+    """Return the constraints whose SQL names any of ``columns``."""
+    wanted = set(columns)
+    return {
+        name
+        for name, text in checks.items()
+        if any(re.search(rf"\b{re.escape(column)}\b", text) for column in wanted)
+    }
+
+
+@pytest.mark.parametrize(
+    ("probes", "table"),
+    [
+        (integration.RECONCILIATION_PROBES, _RECONCILIATION_TABLE),
+        (integration.HALT_PROBES, _HALT_TABLE),
+    ],
+    ids=["reconciliation", "halt"],
+)
+def test_every_raw_insert_probe_declares_the_constraints_its_columns_touch(
+    probes: tuple[integration.ConstraintProbe, ...], table: sa.Table
+) -> None:
+    """A probe must know which other CHECKs its overridden columns reach.
+
+    CHECK evaluation order is unspecified in Postgres, so a probe row that breaks
+    two constraints reports whichever the server reaches first: the test then
+    fails for the wrong reason, or passes by luck and stops meaning anything. That
+    cost P11.2 four tests and P11.3 one, and left a third passing on luck.
+
+    This cannot verify that the probe's *values* satisfy the neighbours — only a
+    database can, and the integration test's assertion on the constraint **name**
+    is what does it. What it can do, without Docker, is make the coupling
+    impossible to overlook: if an override touches a column named by another
+    constraint, the probe has to say so.
+    """
+    checks = _checks_of(table)
+    assert checks, table.name
+    for probe in probes:
+        assert probe.constraint in checks, (table.name, probe.constraint)
+        reached = _mentioning(checks, probe.overrides)
+        assert probe.constraint in reached, (
+            f"{probe.constraint} does not name any column {sorted(probe.overrides)} overrides; "
+            f"the probe cannot be aiming at it"
+        )
+        neighbours = reached - {probe.constraint}
+        assert neighbours == set(probe.also_mentions), (
+            f"probe for {probe.constraint} overrides {sorted(probe.overrides)}, which also "
+            f"reaches {sorted(neighbours)}; declared {sorted(probe.also_mentions)}"
+        )
+
+
+def test_the_probe_lists_cover_the_constraints_worth_probing() -> None:
+    # Guards against a probe list that quietly shrinks. Not every CHECK needs a
+    # probe — some are unreachable in isolation — but the ones that are aimed at
+    # must stay aimed at.
+    reconciliation = {probe.constraint for probe in integration.RECONCILIATION_PROBES}
+    halt = {probe.constraint for probe in integration.HALT_PROBES}
+    assert {"matched_iff_no_breaks", "counts_consistent", "tolerance_within_ceiling"} <= (
+        reconciliation
+    )
+    assert {"clearance_fields_iff_cleared", "trigger_iff_engaged", "event_is_known"} <= halt

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -96,21 +97,41 @@ _STAMP_COLUMNS: Mapping[str, object] = {
 }
 
 
-async def raw_insert(table: str, values: Mapping[str, object]) -> None:
-    """Insert one row with raw SQL, bypassing every Python-side guard.
+def _insert_sql(table: str, values: Mapping[str, object]) -> str:
+    """Render an INSERT whose values are all bound and whose table is a constant.
 
     The point of restating the constraints in SQL is that they bind a writer that
     skips this codebase, and that claim is only testable by being such a writer.
     Table and column names are interpolated because they cannot be bound
-    parameters; every *value* is bound. Both table names are module constants, not
-    caller input.
+    parameters; every *value* is bound. Both table names are module constants,
+    never caller input.
     """
     columns = ", ".join(values)
     binds = ", ".join(f":{name}" for name in values)
-    statement = f"INSERT INTO {table} ({columns}) VALUES ({binds})"  # noqa: S608 - see docstring
+    return f"INSERT INTO {table} ({columns}) VALUES ({binds})"  # noqa: S608 - see docstring
+
+
+async def raw_insert(table: str, values: Mapping[str, object]) -> None:
+    """Insert one row with raw SQL, bypassing every Python-side guard."""
     async with ingest_writer_session() as session:
-        await session.execute(sa.text(statement), values)
+        await session.execute(sa.text(_insert_sql(table, values)), values)
         await session.commit()
+
+
+async def insert_halt_row(**overrides: object) -> int:
+    """Insert one halt row raw and return its generated ``halt_id``.
+
+    Needed by the probes that must name a real foreign-key target: a dangling
+    ``clears_halt_id`` would let the foreign key fire instead of the CHECK under
+    test, which is the same "the row breaks more than one thing" failure these
+    probes exist to avoid.
+    """
+    values = halt_row(**overrides)
+    statement = f"{_insert_sql('execution_halt', values)} RETURNING halt_id"
+    async with ingest_writer_session() as session:
+        halt_id = int((await session.execute(sa.text(statement), values)).scalar_one())
+        await session.commit()
+    return halt_id
 
 
 def halt_row(**overrides: object) -> dict[str, object]:
@@ -466,53 +487,149 @@ async def test_concurrent_engagements_from_separate_transactions_all_land() -> N
 
 # ---------------------------------------------------------------------------
 # The CHECK constraints, against writers that skip Python entirely.
+#
+# **A probe row must violate exactly the constraint it names.** CHECK evaluation
+# order is unspecified in Postgres, so a row that breaks two constraints reports
+# whichever the server reaches first — and the test then either fails for the
+# wrong reason or passes by luck. P11.2 lost four tests to this and P11.3 lost
+# one; a third, ``{"event": "paused"}``, was passing on luck alone (it also broke
+# ``trigger_iff_engaged``, because an unknown event makes ``event = 'engaged'``
+# false while ``halt_trigger`` is still set).
+#
+# So each probe declares ``also_mentions``: the other constraints whose SQL names
+# a column this probe overrides, and which its values are chosen to keep
+# satisfied. ``test_control_migration.py`` checks that declaration against the
+# ORM's constraint texts without needing a database, so an override that quietly
+# starts touching a second constraint fails in the unit suite rather than in CI.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("overrides", "constraint"),
-    [
-        ({"reported_origin": "live_broker"}, "reported_origin_is_not_live"),
-        ({"reported_origin": "internal_ledger"}, "reported_origin_is_not_live"),
-        ({"internal_origin": "paper_broker"}, "internal_origin_is_ledger"),
-        ({"cash_tolerance_usd": Decimal("1.00")}, "tolerance_within_ceiling"),
-        ({"cash_tolerance_usd": Decimal("-0.01")}, "tolerance_within_ceiling"),
-        ({"matched": False}, "matched_iff_no_breaks"),
-        ({"break_count": 1, "matched": True}, "matched_iff_no_breaks"),
-        ({"break_count": 1, "finding_count": 0, "matched": False}, "counts_consistent"),
-        ({"cycle_id": ""}, "cycle_id_present"),
-        ({"result_digest": "not-a-digest"}, "result_digest_is_sha256"),
-        ({"git_commit": "abc"}, "git_commit_is_sha"),
-        ({"seed": -1}, "seed_non_negative"),
-    ],
+@dataclass(frozen=True)
+class ConstraintProbe:
+    """One raw-insert row aimed at exactly one CHECK constraint.
+
+    Attributes:
+        constraint: the unprefixed name the refusal must quote.
+        overrides: the deviations from the valid base row.
+        also_mentions: other constraints on the table whose SQL names one of the
+            overridden columns. Declaring them is what forces the isolation
+            analysis to be done rather than assumed; the probe's values must
+            leave every one of them satisfied.
+    """
+
+    constraint: str
+    overrides: dict[str, object]
+    also_mentions: frozenset[str] = frozenset()
+
+
+RECONCILIATION_PROBES: tuple[ConstraintProbe, ...] = (
+    ConstraintProbe("reported_origin_is_not_live", {"reported_origin": "live_broker"}),
+    ConstraintProbe("reported_origin_is_not_live", {"reported_origin": "internal_ledger"}),
+    ConstraintProbe("internal_origin_is_ledger", {"internal_origin": "paper_broker"}),
+    ConstraintProbe("tolerance_within_ceiling", {"cash_tolerance_usd": Decimal("1.00")}),
+    ConstraintProbe("tolerance_within_ceiling", {"cash_tolerance_usd": Decimal("-0.01")}),
+    ConstraintProbe("matched_iff_no_breaks", {"matched": False}),
+    # finding_count is raised alongside break_count so counts_consistent still
+    # holds. Without it the row broke both, and CI reported counts_consistent.
+    ConstraintProbe(
+        "matched_iff_no_breaks",
+        {"break_count": 1, "finding_count": 1, "matched": True},
+        frozenset({"counts_consistent"}),
+    ),
+    ConstraintProbe(
+        "counts_consistent",
+        {"break_count": 1, "finding_count": 0, "matched": False},
+        frozenset({"matched_iff_no_breaks"}),
+    ),
+    ConstraintProbe("cycle_id_present", {"cycle_id": ""}),
+    ConstraintProbe("result_digest_is_sha256", {"result_digest": "not-a-digest"}),
+    ConstraintProbe("git_commit_is_sha", {"git_commit": "abc"}),
+    ConstraintProbe("seed_non_negative", {"seed": -1}),
 )
+
+HALT_PROBES: tuple[ConstraintProbe, ...] = (
+    # halt_trigger is cleared too: an unknown event makes (event = 'engaged')
+    # false, so a row keeping halt_trigger would also break trigger_iff_engaged.
+    ConstraintProbe(
+        "event_is_known",
+        {"event": "paused", "halt_trigger": None},
+        frozenset({"trigger_iff_engaged", "trigger_is_known", "clearance_fields_iff_cleared"}),
+    ),
+    ConstraintProbe(
+        "trigger_is_known",
+        {"halt_trigger": "because_i_said_so"},
+        frozenset({"trigger_iff_engaged"}),
+    ),
+    ConstraintProbe("trigger_iff_engaged", {"halt_trigger": None}, frozenset({"trigger_is_known"})),
+    ConstraintProbe("cycle_id_present", {"cycle_id": ""}),
+    ConstraintProbe("detail_present", {"detail": ""}),
+    ConstraintProbe(
+        "clearance_fields_iff_cleared",
+        {"cleared_by": "someone"},
+        frozenset({"cleared_by_present"}),
+    ),
+    ConstraintProbe(
+        "clearance_fields_iff_cleared",
+        {"clearance_reason": "because I felt like it"},
+        frozenset({"clearance_reason_present"}),
+    ),
+    ConstraintProbe("git_commit_is_sha", {"git_commit": "abc"}),
+    ConstraintProbe("seed_non_negative", {"seed": -1}),
+)
+
+
+@pytest.mark.parametrize("probe", RECONCILIATION_PROBES, ids=lambda probe: probe.constraint)
 async def test_a_raw_insert_cannot_bypass_the_reconciliation_constraints(
-    overrides: dict[str, object], constraint: str
+    probe: ConstraintProbe,
 ) -> None:
     with pytest.raises(IntegrityError) as caught:
-        await raw_insert("execution_reconciliation", reconciliation_row(**overrides))
-    assert constraint in str(caught.value)
+        await raw_insert("execution_reconciliation", reconciliation_row(**probe.overrides))
+    # The constraint *name*, not merely "something refused it". Asserting the name
+    # is what caught the un-isolated probe this list used to contain.
+    assert probe.constraint in str(caught.value)
 
 
-@pytest.mark.parametrize(
-    ("overrides", "constraint"),
-    [
-        ({"event": "paused"}, "event_is_known"),
-        ({"halt_trigger": "because_i_said_so"}, "trigger_is_known"),
-        ({"halt_trigger": None}, "trigger_iff_engaged"),
-        ({"cycle_id": ""}, "cycle_id_present"),
-        ({"detail": ""}, "detail_present"),
-        ({"cleared_by": "someone"}, "clearance_fields_iff_cleared"),
-        ({"git_commit": "abc"}, "git_commit_is_sha"),
-        ({"seed": -1}, "seed_non_negative"),
-    ],
-)
-async def test_a_raw_insert_cannot_bypass_the_halt_constraints(
-    overrides: dict[str, object], constraint: str
-) -> None:
+@pytest.mark.parametrize("probe", HALT_PROBES, ids=lambda probe: probe.constraint)
+async def test_a_raw_insert_cannot_bypass_the_halt_constraints(probe: ConstraintProbe) -> None:
     with pytest.raises(IntegrityError) as caught:
-        await raw_insert("execution_halt", halt_row(**overrides))
-    assert constraint in str(caught.value)
+        await raw_insert("execution_halt", halt_row(**probe.overrides))
+    assert probe.constraint in str(caught.value)
+
+
+async def test_an_engagement_carrying_a_clearance_id_is_refused() -> None:
+    """The stray that made a halt permanently un-clearable.
+
+    ``uq_execution_halt_clears_halt_id`` is on the column unconditionally, so an
+    engagement carrying a ``clears_halt_id`` consumed the unique slot for that
+    halt: the genuine clearance was then refused with ``23505`` and reported as
+    ``HaltAlreadyClearedError`` while ``open_halts`` — which counts clearances
+    only where ``event = 'cleared'`` — kept reporting the halt open.
+
+    Given its own test rather than a parametrised row because it needs a real
+    foreign-key target, and a dangling id would let the FK fire instead of the
+    CHECK.
+    """
+    target = await insert_halt_row()
+    with pytest.raises(IntegrityError) as caught:
+        await raw_insert("execution_halt", halt_row(clears_halt_id=target))
+    assert "clearance_fields_iff_cleared" in str(caught.value)
+
+
+async def test_a_well_formed_clearance_inserted_raw_is_accepted() -> None:
+    # The positive control the three clearance refusals need. A constraint that
+    # rejects every shape proves nothing about the shapes it means to reject, and
+    # the per-column form is a widening — so what it still admits has to be shown.
+    target = await insert_halt_row()
+    await raw_insert(
+        "execution_halt",
+        halt_row(
+            event="cleared",
+            halt_trigger=None,
+            clears_halt_id=target,
+            cleared_by="operator-on-call",
+            clearance_reason="investigated and resolved",
+        ),
+    )
 
 
 async def test_the_tolerance_ceiling_admits_its_own_boundary() -> None:

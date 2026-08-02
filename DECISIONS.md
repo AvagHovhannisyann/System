@@ -1140,3 +1140,55 @@ skew tests were written *relative to the constant*. A test that derives its expe
 the value under test cannot detect that value being wrong — the same shape as D-027's sign
 inversion, which survived its own unit tests for the same reason. All three thresholds are
 now asserted as literals.
+
+## D-038 — A conditional rule over a conjunction is weaker than it reads (2026-08-02)
+
+**Third instance of one shape, so it is worth stating as a rule rather than a fix.**
+`clearance_fields_iff_cleared` was written as:
+
+```sql
+(event = 'cleared') = (clears_halt_id IS NOT NULL AND cleared_by IS NOT NULL
+                       AND clearance_reason IS NOT NULL)
+```
+
+That reads as "the three clearance columns are populated exactly on a clearance". It is
+not what it says. With `event = 'engaged'` the right-hand side need only be *false*, which
+requires just **one** of the three to be NULL — so an engagement could carry any proper
+subset. Only all-three-present was refused.
+
+**The direction everyone checks was already safe.** A clearance is forced to carry all
+three, so an unattributed clearance was never possible. The hole is on the engagement side,
+which is the side nobody thinks about, and one stray is materially dangerous:
+`uq_execution_halt_clears_halt_id` is unconditional on the column. An engagement carrying a
+stray `clears_halt_id = N` **consumes the unique slot for halt N**. The genuine clearance of
+N is then refused with `23505`, which the store translates to `HaltAlreadyClearedError` —
+telling the operator halt N "has already been cleared" when it has not. Meanwhile
+`open_halts` counts clearances only where `event = 'cleared'`, so the stray is not counted
+and **halt N stays open forever with no way to close it**, reporting an error that actively
+misdescribes why. The clearance guard trigger cannot catch it either: it returns immediately
+for a non-clearance, deliberately, because nothing may refuse an engagement (D-037).
+
+**The rule: tie each column to the condition on its own.**
+
+```sql
+(event = 'cleared') = (clears_halt_id     IS NOT NULL)
+AND (event = 'cleared') = (cleared_by     IS NOT NULL)
+AND (event = 'cleared') = (clearance_reason IS NOT NULL)
+```
+
+This is the shape D-030 arrived at for retraction payloads and `trigger_iff_engaged`
+already used. The generalisable danger is **a unique index on a column whose population is
+governed by a weaker predicate than intended** — the index then enforces scarcity over rows
+the author never meant to admit.
+
+**Corrected in migration 0016 in place, not in a follow-up revision.** The constraint was
+wrong on arrival, no database outside ephemeral CI containers has ever applied it, and
+splitting one constraint's origin across two revisions would hide the defect from anyone
+reading the schema's history. Same reasoning as the identifier-length shortenings.
+
+**And a guard, because this class kept costing runs.** Four raw-INSERT probes were lost to
+constraint-collision in P11.2, one in P11.3, and one more was *passing on luck*. Probes now
+declare which other constraints their overrides reach, cross-referenced against the ORM's
+constraint texts by a unit test that needs no database. Its limit is stated in its own
+docstring: it proves the coupling was **noticed**, not that the probe's values satisfy the
+neighbour — only a real database can do that, via the constraint-name assertion in CI.

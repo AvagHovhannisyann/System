@@ -30,7 +30,15 @@ cycle that already halted — all accepted. A redundant halt row costs nothing.
 **A halt is cleared at most once, and only by naming an engagement.**
 ``UNIQUE (clears_halt_id)`` gives the first; the ``execution_halt_clearance_guard``
 trigger gives the second. NULLs are distinct in Postgres, so the unique index
-leaves every engagement untouched.
+leaves every engagement untouched — *provided* no engagement can carry a
+``clears_halt_id`` at all, which is what ``clearance_fields_iff_cleared``
+enforces per column. Its first version stated the rule over the conjunction of
+the three clearance columns and so admitted a stray id on an engagement; that
+row consumed the unique slot and made the halt permanently un-clearable while
+reporting "already cleared". Corrected in place rather than in a follow-up
+revision: the constraint was wrong on arrival, no database outside ephemeral CI
+containers has ever applied this revision, and splitting one constraint's
+origin across two revisions would hide that.
 
 **Deciding on SQLSTATE, never on the exception class (D-034).** A ``BEFORE
 INSERT`` trigger fires ahead of every CHECK and every index, and a plpgsql
@@ -238,13 +246,16 @@ def upgrade() -> None:
             "(event = 'engaged') = (halt_trigger IS NOT NULL)", name="trigger_iff_engaged"
         ),
         sa.CheckConstraint(_HALT_TRIGGERS_SQL, name="trigger_is_known"),
-        # The three clearance columns arrive together or not at all: a clearance
-        # missing its attribution is an anonymous re-enable, and an engagement
-        # carrying one is a halt that pre-authorises its own removal.
+        # The three clearance columns are present exactly on a clearance, stated
+        # **per column**. The conjunction form this replaced only forbade an
+        # engagement carrying all three; a stray clears_halt_id alone was
+        # accepted and consumed the unique slot for that halt, making it
+        # permanently un-clearable. See the class docstring in
+        # backend/db/models.py for the full failure.
         sa.CheckConstraint(
-            "(event = 'cleared') = ("
-            "clears_halt_id IS NOT NULL AND cleared_by IS NOT NULL "
-            "AND clearance_reason IS NOT NULL)",
+            "(event = 'cleared') = (clears_halt_id IS NOT NULL) "
+            "AND (event = 'cleared') = (cleared_by IS NOT NULL) "
+            "AND (event = 'cleared') = (clearance_reason IS NOT NULL)",
             name="clearance_fields_iff_cleared",
         ),
         sa.CheckConstraint("cleared_by IS NULL OR cleared_by <> ''", name="cleared_by_present"),

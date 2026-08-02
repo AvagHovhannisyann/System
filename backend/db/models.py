@@ -2563,13 +2563,30 @@ class ExecutionHalt(Base):
             "'unknown_condition')",
             name="trigger_is_known",
         ),
-        # The three clearance columns arrive together or not at all: a clearance
-        # missing its attribution is an anonymous re-enable, and an engagement
-        # carrying one is a halt that pre-authorises its own removal.
+        # The three clearance columns are present exactly on a clearance —
+        # stated **per column**, which is what the first version got wrong.
+        #
+        # It originally read `(event = 'cleared') = (a IS NOT NULL AND b IS NOT
+        # NULL AND c IS NOT NULL)`, which only forbids an engagement carrying all
+        # three. Any proper subset was accepted, and one of those subsets is
+        # dangerous: `uq_execution_halt_clears_halt_id` is on the column
+        # unconditionally, so an engagement carrying a stray clears_halt_id
+        # consumes the unique slot for that halt. The genuine clearance is then
+        # refused with SQLSTATE 23505 and surfaces as HaltAlreadyClearedError —
+        # telling an operator the halt "has already been cleared" when it has
+        # not, while open_halts (which counts clearances only where
+        # event = 'cleared') keeps reporting it open. The halt becomes
+        # permanently un-clearable and the error actively misdescribes why.
+        #
+        # The clearance guard trigger cannot catch it either: it returns
+        # immediately for a non-clearance, deliberately, because nothing may
+        # refuse an engagement.
+        #
+        # Same D-030 shape `trigger_iff_engaged` already uses for halt_trigger.
         CheckConstraint(
-            "(event = 'cleared') = ("
-            "clears_halt_id IS NOT NULL AND cleared_by IS NOT NULL "
-            "AND clearance_reason IS NOT NULL)",
+            "(event = 'cleared') = (clears_halt_id IS NOT NULL) "
+            "AND (event = 'cleared') = (cleared_by IS NOT NULL) "
+            "AND (event = 'cleared') = (clearance_reason IS NOT NULL)",
             name="clearance_fields_iff_cleared",
         ),
         CheckConstraint("cleared_by IS NULL OR cleared_by <> ''", name="cleared_by_present"),
