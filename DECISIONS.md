@@ -763,3 +763,29 @@ finding a researcher *wants*, and therefore the one least likely to be audited.
 **Consequence today.** No code path in this repository can build a non-empty return panel,
 so the only reachable outcome of running the harness is `FactorReturnsUnavailableError`.
 No premia table exists and none was fabricated.
+
+## D-030 — A retraction carries no payload, enforced by two CHECKs (P2.10, 2026-08-02)
+
+**The defect.** A retraction is a row: same logical key, same event-time interval, later
+`knowledge_time`, `is_retraction = true`. Every payload column was `NOT NULL`, so writing
+one meant inventing a `close_usd`, a `volume_shares` and an `adjustment_factor` that no
+source ever stated. Those numbers sat in a fact table **byte-identical to real
+observations** — fabricated data inside the store that I1 reads from. Nothing downstream
+could tell them apart, and neither could the storage layer.
+
+**Decision: make the absence structural, in both directions.** Migration 0012 drops
+`NOT NULL` from every payload column — payload meaning every column that is neither part of
+the logical key nor one of the five D-011 temporal/audit columns — and adds *two*
+constraints per table:
+
+- `ck_<table>_retraction_payload_absent` — `NOT is_retraction OR (every payload column IS
+  NULL)`. A retraction carrying a value is refused.
+- `ck_<table>_observation_payload_present` — `is_retraction OR (every required payload
+  column IS NOT NULL)`. An observation missing a value is refused.
+
+**The second constraint is the one that makes this a fix rather than a loosening.** Merely
+dropping `NOT NULL` would trade a fabrication bug for a worse one: silently admitting
+observations with missing payloads, which is the same class of defect pointing the other
+way and harder to notice, because an absent number reads as a gap rather than as a lie.
+Enforced at the database, so it holds on every role, session and write path — ORM, raw
+`INSERT`, or `COPY` — not only where application code remembers to check.
