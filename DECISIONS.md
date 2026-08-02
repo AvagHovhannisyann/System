@@ -545,3 +545,42 @@ blocked on B1. Defaults (barrier multiples 1.0/1.0, 20-bar volatility, 252-bar e
 condition limit 1e8, noise-floor ratio 1e-8) are defensible, **not calibrated** — and
 every variant tried in calibrating them belongs in `TESTING_LEDGER.md`, because they feed
 the Deflated Sharpe trial count (§9.7).
+
+## D-024 — CSRF token tampering: test exhaustively by position, document the tail equivalence class (2026-08-01)
+
+**Trigger.** CI went red on `test_tampered_cookie_and_header_are_refused` — a *security*
+test asserting a tampered CSRF token is refused, which instead saw `200`. The obvious
+readings were "CSRF is broken" or "flaky, re-run it". Both are wrong.
+
+**What is actually true.** The test took a genuine token and flipped its **last**
+character to `"A"`. An HMAC-SHA1 signature is 20 bytes = 160 bits, base64-encoded into 27
+characters = 162 bits; the two surplus bits are padding and Python's decoder ignores them.
+So the four characters sharing the final character's top four bits **all decode to the
+same signature** and all verify. Whenever the token happened to end in `"A"`, the test
+flipped it to `"B"` — inside the same equivalence class — and the "tampered" token was
+genuinely valid. Measured directly: **117 of 2,000 tokens (5.85%)**, against a predicted
+1/16 = 6.25%, and the observed final characters were exactly the 16 alphabet positions
+divisible by four, as the arithmetic requires.
+
+**Decision: fix the test, not the library.**
+- Tampering is now asserted **at every position of the token**, not one sampled position.
+  The substitution steps a whole equivalence class at the final position and one alphabet
+  position everywhere else, so every edit provably changes the decoded bytes. Measured
+  after the change: **0 accepted tampered tokens across 500 fresh tokens** (~25,000 edits),
+  where the old assertion failed 5.9% of runs.
+- The tail equivalence class is now asserted in its own named test, so the property is
+  *recorded* rather than lurking. A future reader who flips a trailing character will find
+  the explanation instead of rediscovering it through a red build.
+
+**Why not harden the application to reject non-canonical encodings.** It is not a forgery
+route: producing one of the four variants requires already holding a valid token, and for
+double-submit CSRF an attacker holding the token has already won. The alternative —
+hand-rolling canonical-base64 enforcement around `itsdangerous` — adds bespoke
+crypto-adjacent parsing to defend against a non-threat. Documented wart beats custom
+crypto.
+
+**Standing lesson.** A security test that fails ~6% of the time reads exactly like flake,
+and the cheapest response — re-run until green — would have preserved a test that could
+not distinguish "tampering is refused" from "tampering is accepted" in one case in sixteen.
+An intermittently-failing assertion is a claim about the system that is *sometimes false*;
+it deserves the same investigation as a hard failure, and I3/I6 forbid the re-run.

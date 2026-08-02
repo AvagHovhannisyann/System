@@ -487,12 +487,78 @@ async def test_token_from_a_foreign_signing_key_is_refused() -> None:
     assert response.json()["reason"] == "csrf_token_invalid"
 
 
+_B64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+"""The URL-safe base64 alphabet itsdangerous encodes tokens with."""
+
+
+def _materially_tamper(token: str, position: int) -> str:
+    """Return ``token`` with ``position`` changed so the *decoded bytes* differ.
+
+    Substituting the next character in the alphabet is enough everywhere except
+    the final position, where only the top four bits are significant (see
+    :func:`test_signature_tail_has_an_encoding_equivalence_class`); there the
+    substitution has to step a whole equivalence class, hence ``+ 4``.
+    """
+    original = token[position]
+    if original not in _B64URL_ALPHABET:  # a '.' section separator
+        return token[:position] + "A" + token[position + 1 :]
+    step = 4 if position == len(token) - 1 else 1
+    index = (_B64URL_ALPHABET.index(original) + step) % len(_B64URL_ALPHABET)
+    return token[:position] + _B64URL_ALPHABET[index] + token[position + 1 :]
+
+
+def test_tampering_at_every_position_is_refused() -> None:
+    """No single-character edit anywhere in a token survives verification.
+
+    Exhaustive over positions rather than sampling one, because the position
+    that used to be sampled — the last — is the single position where a naive
+    edit does *not* always change the signature.
+    """
+    protect = CsrfProtect("k" * 32, max_age_s=3600)
+    token = protect.issue()
+    for position in range(len(token)):
+        tampered = _materially_tamper(token, position)
+        assert tampered != token, position
+        with pytest.raises(CsrfError) as caught:
+            protect.verify(tampered, tampered)
+        assert caught.value.args[0] == "csrf_token_invalid", position
+
+
+def test_signature_tail_has_an_encoding_equivalence_class() -> None:
+    """The final character carries four significant bits, not six — documented, not a hole.
+
+    An HMAC-SHA1 signature is 20 bytes = 160 bits, base64-encoded into 27
+    characters = 162 bits. The two surplus bits are padding, and Python's
+    decoder ignores them, so the four characters sharing the final character's
+    top four bits all decode to the *same* signature and all verify.
+
+    This is an encoding artefact, not a forgery route: producing any of the
+    four requires already holding a valid token, which for double-submit CSRF
+    means already having won. It is asserted here so the property is recorded
+    where someone can find it — a previous version of the tampering test above
+    flipped exactly this character to ``"A"``, which silently landed inside the
+    equivalence class whenever the token ended in ``"A"`` and failed CI at a
+    measured 5.9% of runs.
+    """
+    protect = CsrfProtect("k" * 32, max_age_s=3600)
+    token = protect.issue()
+    base = _B64URL_ALPHABET.index(token[-1]) & ~0b11
+    equivalents = [token[:-1] + _B64URL_ALPHABET[base + offset] for offset in range(4)]
+
+    assert token in equivalents
+    for variant in equivalents:
+        protect.verify(variant, variant)  # no raise: same decoded signature
+
+    outside = token[:-1] + _B64URL_ALPHABET[(base + 4) % len(_B64URL_ALPHABET)]
+    with pytest.raises(CsrfError):
+        protect.verify(outside, outside)
+
+
 async def test_tampered_cookie_and_header_are_refused() -> None:
-    """Flipping one character of a genuine token invalidates it on both halves."""
+    """A tampered token is refused end-to-end, on both halves of the double submit."""
     app = build_test_app()
     token: str = app.state.csrf.issue()
-    flipped = "A" if token[-1] != "A" else "B"
-    tampered = token[:-1] + flipped
+    tampered = _materially_tamper(token, 0)
     async with client_for(app) as client:
         client.cookies.set(CSRF_COOKIE_NAME, tampered)
         response = await client.post(ECHO_PATH, headers={CSRF_HEADER_NAME: tampered})
