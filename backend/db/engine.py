@@ -25,6 +25,15 @@ structural walker fails to recognize. The single deliberate exception is
 :func:`_create_migration_engine` — module-private, for alembic runs and the
 sanctioned test/db reset, where DDL like
 ``create_hypertable('price_bar', ...)`` and ``TRUNCATE`` must execute.
+
+**Two roles, since CC.9 (D-017).** Every engine here except
+:func:`_create_migration_engine` connects on ``settings.database_url`` as the
+*application* role, which owns nothing and therefore cannot drop or disable the
+append-only triggers, alter a table, or truncate one.
+:func:`_create_migration_engine` alone connects on ``settings.migration_url`` as
+the *schema owner*. That split is what turns "append-only" from a convention the
+connecting role could revoke on itself into a property it has no privilege to
+touch.
 """
 
 from __future__ import annotations
@@ -155,10 +164,18 @@ def _create_migration_engine(
     - the integration-test database reset (``TRUNCATE`` of fact tables),
       reached via dynamic import in the test fixtures.
 
+    Connects on ``settings.migration_url`` — the **schema-owner** role — not on
+    ``database_url``, which since CC.9 (D-017) names an application role that
+    holds no DDL rights and no ``TRUNCATE``. Both sanctioned uses above need
+    exactly the privileges the app role deliberately lacks, so this is the one
+    place the owner credential is used. ``migration_url`` falls back to
+    ``database_url`` when ``MIGRATION_DATABASE_URL`` is unset, which keeps a
+    single-role local database and the integration container working unchanged.
+
     Not importable outside ``backend/db`` (ruff TID251 bans this module
     elsewhere); it is deliberately absent from ``__all__``. ``engine_kwargs``
     pass through to ``create_async_engine`` (e.g. ``poolclass``). When
     ``settings`` is omitted the cached application settings are used.
     """
     resolved = settings if settings is not None else get_settings()
-    return create_async_engine(resolved.database_url, **engine_kwargs)
+    return create_async_engine(resolved.migration_url, **engine_kwargs)

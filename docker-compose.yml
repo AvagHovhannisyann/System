@@ -74,7 +74,23 @@ services:
       context: .
       dockerfile: docker/backend.Dockerfile
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quant}@db:5432/${POSTGRES_DB:-quant}
+      # Two roles, never one (CC.9, DECISIONS.md D-017). The serving process
+      # authenticates as the application role: SELECT/INSERT, owns nothing, so
+      # it cannot DROP or DISABLE the append-only triggers, ALTER a table, or
+      # TRUNCATE one. "Immutable audit log" is only a true claim because this
+      # credential cannot revoke the enforcement on itself.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_APP_USER:-quant_app}:${POSTGRES_APP_PASSWORD:-quant_app}@db:5432/${POSTGRES_DB:-quant}
+      # Alembic — and only alembic — connects as the schema owner. The
+      # entrypoint unsets this before exec'ing uvicorn, so the serving process
+      # does not hold the owner credential at all.
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quant}@db:5432/${POSTGRES_DB:-quant}
+      # Read by migration 0015 when it creates or re-points the application
+      # role. Same two variables that compose DATABASE_URL above, so the role
+      # the migration creates and the role the app logs in as cannot disagree.
+      # Local-development defaults follow POSTGRES_USER/POSTGRES_PASSWORD:
+      # a known throwaway credential for a database that holds nothing.
+      APP_DB_ROLE: ${POSTGRES_APP_USER:-quant_app}
+      APP_DB_PASSWORD: ${POSTGRES_APP_PASSWORD:-quant_app}
       REDIS_URL: redis://redis:6379/0
       # Read by the MLflow client as its default tracking URI. Not templated:
       # this is a compose-network address, and pointing it elsewhere by

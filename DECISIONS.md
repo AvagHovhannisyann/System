@@ -1037,3 +1037,55 @@ statement about correctness.
 reason. The next one added fails loudly and explains itself. Two existing pragmas in
 `backend/portfolio/optimizer.py` say only "defensive" and are too thin — flagged for that
 file's owner rather than edited.
+
+## D-036 — Role separation closes D-012's residual weakness, and two routes D-012 never named (CC.9, 2026-08-02)
+
+**D-017's deadline is met, late.** Phase 11 had already started (P11.2 landed first), which is
+recorded in `BLOCKERS.md` rather than smoothed over.
+
+**The two routes D-012 did not name are the reason this could not stay backlogged.** D-012
+described the weakness as "the owning role can `DROP`/`DISABLE` its own triggers". That
+understates it, and both omissions are worse than the one it named because neither produces
+an error:
+
+- **`SET session_replication_role = 'replica'`** silences every `ORIGIN` trigger for the
+  session while leaving `DELETE` working normally. Demonstrated live during this work: with
+  `SUPERUSER`, the application role deleted **every `price_bar` row straight through the
+  append-only trigger**. It requires superuser — which is precisely why the new role carries
+  `NOSUPERUSER`.
+- **`TRUNCATE` fires no row trigger at all**, and migrations 0003/0004 deliberately left it
+  unblocked for the test reset. Under a single role, `TRUNCATE config_change_event` erased
+  the "immutable" audit log **with no error and no trace**.
+
+Neither is closed by a trigger. Only privilege separation closes them, which is the argument
+for why D-012's mitigation was never sufficient on its own.
+
+**The grants.** The application role owns nothing, holds no role memberships, and has every
+attribute flag false except `rolcanlogin`. `SELECT` + `INSERT` on all tables; `UPDATE` on
+`ingestion_run` alone (a run must close `running → succeeded/failed`); `UPDATE`/`DELETE` on
+`llm_provider_credential` alone (a rotation must overwrite ciphertext and a deletion must
+remove it, or a KEK compromise widens from "every key in use" to "every key ever used").
+Those are exactly the two tables that revisions 0003–0017 left without an append-only
+trigger, so no immutability claim is weakened by the exceptions. `alembic_version` is
+read-only. `ALTER DEFAULT PRIVILEGES` makes the default for future tables `SELECT`+`INSERT`,
+so a future *mutable* table must grant in its own migration — default-deny, and the failure
+is `permission denied`, never silent.
+
+**I5 at the boundary.** The password reaches PostgreSQL only as a **bind parameter** to
+`set_config(..., is_local => true)`; the `CREATE ROLE` text is assembled server-side by
+`format(%L)`. It is therefore in no statement string this process holds and cannot reach a
+log, an echoed statement, or a `DBAPIError`. The handler re-raises with SQLSTATE only, never
+`SQLERRM`. Verified by forcing a `CREATE ROLE` failure and confirming the message, detail and
+context carried no password and no statement text.
+
+**Two mutations initially survived, and both were D-025's defect recurring.** A substring
+scan placated by prose: flipping `NOSUPERUSER` to `SUPERUSER` passed because the module
+*docstring* contains the word, and reverting the migration engine to `database_url` passed
+because its docstring mentions `migration_url`. Fixed by parsing — the SQL constants and the
+AST, where docstrings contribute nothing. **The same lesson has now cost three separate
+tracks**; a scan over file text cannot distinguish a rule from a description of the rule.
+
+**Still unverified:** TimescaleDB chunk ACL propagation — that grants on `price_bar` and
+`edgar_filing` reach their chunks. 0015 re-issues a grant per hypertable *by name* precisely
+because the `ALL TABLES` form may not propagate, but no Timescale instance was reachable.
+The integration suite's insert-and-read test is what will confirm it.

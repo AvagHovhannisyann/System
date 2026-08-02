@@ -1,9 +1,18 @@
 """Alembic migration environment (async-compatible).
 
 Executed by the alembic CLI. The database URL always comes from backend
-settings (``DATABASE_URL`` environment variable / ``.env``); ``alembic.ini``
-stores no URL. Importing this module outside an alembic run fails fast on
-``context.config`` — that is intentional.
+settings; ``alembic.ini`` stores no URL. Importing this module outside an
+alembic run fails fast on ``context.config`` — that is intentional.
+
+**Migrations connect as the schema owner, never as the application role**
+(CC.9, D-017). The URL is ``settings.migration_url``
+(``MIGRATION_DATABASE_URL``, falling back to ``DATABASE_URL``), not
+``DATABASE_URL`` directly. The application's own credential names a role that
+holds ``SELECT``/``INSERT`` and owns nothing, so it cannot create a table — and,
+which is the point, cannot drop or disable the append-only triggers that make
+the audit log immutable. Pointing this environment at ``DATABASE_URL`` in a
+separated deployment does not silently weaken anything: PostgreSQL refuses the
+first DDL statement.
 """
 
 from __future__ import annotations
@@ -33,10 +42,12 @@ target_metadata = Base.metadata
 def _database_url() -> str:
     """Resolve the migration database URL from application settings.
 
-    Honors the ``DATABASE_URL`` environment variable (and ``.env``) via
-    :func:`backend.core.config.get_settings`.
+    Honors ``MIGRATION_DATABASE_URL`` (the schema-owner credential), falling
+    back to ``DATABASE_URL``, via :func:`backend.core.config.get_settings` —
+    see :attr:`backend.core.config.Settings.migration_url` and the module
+    docstring for why migrations must not use the application role.
     """
-    return get_settings().database_url
+    return get_settings().migration_url
 
 
 def run_migrations_offline() -> None:
@@ -64,8 +75,10 @@ async def run_async_migrations() -> None:
     The engine comes from the module-private *migration* factory — the one
     engine deliberately created **without** the Core-level bitemporal read
     guard, because migration DDL necessarily names fact tables (e.g.
-    revision 0003's ``create_hypertable('price_bar', ...)``). ``NullPool``
-    because a migration run needs exactly one short-lived connection.
+    revision 0003's ``create_hypertable('price_bar', ...)``), and the one engine
+    that connects on ``settings.migration_url`` as the schema owner (CC.9).
+    ``NullPool`` because a migration run needs exactly one short-lived
+    connection.
     """
     connectable = _create_migration_engine(poolclass=pool.NullPool)
     async with connectable.connect() as connection:
