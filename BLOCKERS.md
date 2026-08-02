@@ -228,3 +228,22 @@ prices.
 **Needed from the human:** pick a source (the FINRA file directly, or a vendor that
 redistributes it), confirm whether its cost is acceptable, and add the connector as a Phase
 3 task. Until then the factor refuses and G5's coverage clause stays open.
+
+### D-017's deadline has passed (2026-08-02) — recorded so it cannot pass quietly twice
+
+D-017 set a hard condition: **"Role separation ships before Phase 11."** P11.2 landed on
+2026-08-02, so Phase 11 has started and **CC.9 was still TODO**. The deadline was missed.
+
+Recorded here rather than only fixed, because the failure mode D-017 was written to prevent
+is now live: append-only is enforced by triggers owned by the same role the application
+connects as, and that role can `DISABLE`/`DROP` its own triggers. Every claim resting on
+that is currently overstated —
+
+- the §6.11 dashboard **states "immutable audit log" to the operator as fact**;
+- `TESTING_LEDGER.md` integrity is what makes the Deflated Sharpe honest, and DSR is only as
+  good as its trial count (§9.7). A ledger that can be silently edited makes the trial count
+  unverifiable.
+
+CC.9 is now first in the current wave. Until it lands, **neither claim should be presented
+to an operator without this caveat attached** — which is the substance of what D-017 was
+protecting, and the reason a backlog item was given a deadline in the first place.
