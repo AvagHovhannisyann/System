@@ -168,3 +168,29 @@ and *not* skipped) can actually run — migration 0011's runtime behaviour is cu
 unverified, only its structural match to the ORM; (c) B6's UI half, since G4's binary
 condition names size/turnover history *rendered and manually inspected*.
 `UniverseHistory.report()` supplies the programmatic half.
+
+### B1 and G5's first clause — a concrete five-item checklist (2026-08-02)
+
+P5.4 landed the premia validation harness, so what G5's first clause ("known factor premia
+reproduce — sign and plausible magnitude") still needs is now enumerable rather than vague.
+The harness encodes it as `WHAT_G5_STILL_NEEDS`:
+
+1. **Price history in `price_bar`** (P3.4, B1). The three price factors compute but return
+   NaN for every security, because the table is empty.
+2. **Point-in-time fundamentals** (P3.5, B1). The six fundamentals factors raise; no
+   cross-section exists at any date.
+3. **Point-in-time universe membership across the long sample** (Phase 4, itself blocked on
+   B1 per D-026). This one is easy to overlook and matters most: a survivorship-biased
+   universe would reproduce the literature *for the wrong reason*, and the reproduction
+   would look like success.
+4. **A portfolio-construction step** producing the decile long-short spread the published
+   ranges are calibrated for, with a gross/net decision recorded per series (I4).
+5. **Expectations for the three newest factors.** `factors_without_expectations()` returns
+   `('amihud_illiquidity', 'short_interest', 'size')` today. **G5's first clause cannot pass
+   while that tuple is non-empty**, by construction: `reproduces` is True only when every
+   declared expectation was exercised. Suggested sources when P5.6 extends the table —
+   Banz (1981) *JFE* 9(1) for size; Asquith, Pathak & Ritter (2005) *JFE* 78(2) and
+   Boehmer, Huszár & Jordan (2010) for short interest; Amihud (2002) *Journal of Financial
+   Markets* 5(1) for illiquidity.
+
+Item 5 is not blocked on a human — it is ordinary work for P5.6. Items 1–4 are B1.
