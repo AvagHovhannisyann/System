@@ -1,6 +1,6 @@
-"""The baseline factor library (P5.3): nine declarations and their computations.
+"""The baseline factor library (P5.3): twelve declarations and their computations.
 
-Importing this package registers all nine factors into the process-wide
+Importing this package registers all twelve factors into the process-wide
 :func:`~backend.features.registry.default_registry`. That is the intended
 mechanism — ``registry.py`` says the catalog is *"populated by the factor
 modules on import"* — and it means the 30-feature cap is enforced against a
@@ -12,36 +12,54 @@ Feature                 Lag          Computes today  Module
 ``momentum_12_1``       0            yes             :mod:`~.momentum`
 ``short_term_reversal`` 0            yes             :mod:`~.momentum`
 ``low_volatility``      0            yes             :mod:`~.risk`
+``amihud_illiquidity``  0            yes             :mod:`~.liquidity`
 ``book_to_price``       7 days       **no — B1**     :mod:`~.value`
 ``earnings_yield``      7 days       **no — B1**     :mod:`~.value`
 ``gross_profitability`` 7 days       **no — B1**     :mod:`~.quality`
 ``roic``                7 days       **no — B1**     :mod:`~.quality`
 ``accruals``            7 days       **no — B1**     :mod:`~.growth`
 ``asset_growth``        7 days       **no — B1**     :mod:`~.growth`
+``size``                7 days       **no — B1**     :mod:`~.size`
+``short_interest``      17 days      **no — none**   :mod:`~.short_interest`
 ======================  ===========  ==============  =========================
 
 --------------------------------------------------------------------------
-Why six of the nine refuse to compute
+Why eight of the twelve refuse to compute
 --------------------------------------------------------------------------
 
 The point-in-time fundamentals connector (P3.5, Sharadar SF1 on the as-reported
 ARQ/ARY dimensions) is blocked on B1: no vendor credentials, therefore no table,
 no column names, no knowledge-time policy. The six fundamentals-derived factors
-are declared in full and their computations raise
+and ``size`` — whose share count comes from the same feed — are declared in full
+and their computations raise
 :class:`~backend.features.factors._fundamentals.FundamentalsSourceUnavailableError`.
 
-This is not a gap waiting to be filled with something approximate. Directive §2
-I3 and §9.1-9.2 forbid a stub that returns a plausible value, and here the
+``short_interest`` refuses for a *different* reason, and the distinction is the
+point of having two error families. It waits on no blocker at all: there is no
+short-interest table, no Phase 3 connector task for one, and no ``BLOCKERS.md``
+entry, and B1's decision does not cover the feed (it selected Sharadar SF1, SEP,
+SFP and ACTIONS, none of which carries short interest). That gap is
+**unregistered**, which is a finding for the operator rather than a queue
+position, and
+:class:`~backend.features.factors.short_interest.ShortInterestSourceUnavailableError`
+says so instead of borrowing B1's name.
+
+None of this is a gap waiting to be filled with something approximate. Directive
+§2 I3 and §9.1-9.2 forbid a stub that returns a plausible value, and here the
 prohibition has teeth: a fabricated book-to-price is indistinguishable from a
 measured one at every point downstream — the transform pipeline, the design
 matrix, the model, the optimizer, the backtest — and every one of them would
 report healthy numbers. The output would be a backtest that looks real. An
-exception naming the blocker is the only honest state.
+exception naming the blocker is the only honest state. ``size`` carries the
+sharpest version of that temptation, because ``price_bar`` exists and a factor
+built from price alone would look entirely healthy while ranking on share price
+rather than on company value; :mod:`backend.features.factors.size` names the
+shortcut so it is not taken.
 
-The three price factors do compute, against ``price_bar``. That table exists
+The four price factors do compute, against ``price_bar``. That table exists
 (migration 0002) but is empty, because its connector (P3.4) is *also* blocked on
 B1 — so today they return ``NaN`` for every security. ``NaN`` here is honest in
-a way it would not be for the six above: the query runs, the store answers, and
+a way it would not be for the eight above: the query runs, the store answers, and
 the answer is "no data". For a table that does not exist there is no query to
 run and nothing to be not-available about.
 
@@ -57,11 +75,14 @@ value's sign follows one rule:
   stock; ``short_term_reversal`` is the negative of last month's return, so a
   high score is a recent loser. In both cases the name promises a direction and
   the value keeps the promise.
-- a factor named after a **measured quantity** does not negate. ``accruals`` and
-  ``asset_growth`` are the quantities themselves, and both carry an expected
-  premium sign of NEGATIVE — high accruals and fast-growing balance sheets are
-  the underperforming legs. Renaming them to make every sign positive would put
-  a strategy's name on a measurement.
+- a factor named after a **measured quantity** does not negate. ``accruals``,
+  ``asset_growth``, ``size`` and ``short_interest`` are the quantities
+  themselves, and all four carry an expected premium sign of NEGATIVE — high
+  accruals, fast-growing balance sheets, large companies and heavily shorted
+  names are the underperforming legs. ``amihud_illiquidity`` is also a measured
+  quantity and is not negated either, and its expected premium is POSITIVE:
+  illiquid names have earned a liquidity premium. Renaming any of them to make
+  every sign positive would put a strategy's name on a measurement.
 
 A gradient-boosted ranker learns the sign either way, so the convention is not
 for the model. It is for P5.4's premium check, which needs a stated expectation
@@ -95,17 +116,31 @@ a lag too short fabricates foresight, and only the second is invisible to every
 test of the arithmetic. It may be reduced when P3.5 lands with a documented
 policy validated by the Phase 3 gate against a known restatement, with the
 change logged in ``DECISIONS.md``; it may not be reduced because it is costing
-signal.
+signal. ``size`` sits in this regime because its share count does, even though
+half its arithmetic is a price.
+
+**``short_interest`` declares seventeen days, and is the one exception to both
+regimes.** US short interest is published on a *settlement-date* basis about
+eight business days after that settlement date, so the date printed on every row
+is not the date the number became public. A connector keying ``knowledge_time``
+to the settlement date — the obvious join key, and the mistake this margin
+exists to survive — would grant eight business days of foresight twice a month.
+The margin therefore covers the whole publication gap (14 calendar days) plus a
+day for intraday dissemination against a midnight compute instant plus two for
+vendor redistribution. It is generous, and generosity is close to free for a
+factor observed twice a month, where extra days move *which* observation is read
+on a handful of dates rather than discarding a bar of signal.
+:mod:`backend.features.factors.short_interest` derives each component.
 
 --------------------------------------------------------------------------
 Feature budget
 --------------------------------------------------------------------------
 
-Nine of the thirty slots. ``PLAN.md`` P5.3 names two further baseline factors
-not implemented here (size, short interest) plus Amihud illiquidity, and Phase 7
-adds LLM-derived features against the same cap. Registration order decides only
-*which* registration is refused once the catalog is full; the cap itself holds
-after every operation (see :mod:`backend.features.registry`).
+Twelve of the thirty slots — every baseline factor ``PLAN.md`` P5.3 names, with
+eighteen left for Phase 7's LLM-derived features against the same cap.
+Registration order decides only *which* registration is refused once the catalog
+is full; the cap itself holds after every operation (see
+:mod:`backend.features.registry`).
 """
 
 from __future__ import annotations
@@ -123,6 +158,11 @@ from backend.features.factors._prices import (
     PriceTemporalIntegrityError,
 )
 from backend.features.factors.growth import ACCRUALS, ASSET_GROWTH, accruals, asset_growth
+from backend.features.factors.liquidity import (
+    AMIHUD_ILLIQUIDITY,
+    DollarVolumeSeries,
+    amihud_illiquidity,
+)
 from backend.features.factors.momentum import (
     MOMENTUM_12_1,
     SHORT_TERM_REVERSAL,
@@ -136,6 +176,15 @@ from backend.features.factors.quality import (
     roic,
 )
 from backend.features.factors.risk import LOW_VOLATILITY, low_volatility
+from backend.features.factors.short_interest import (
+    SHORT_INTEREST,
+    SHORT_INTEREST_AVAILABILITY_LAG,
+    SHORT_INTEREST_TABLE,
+    ShortInterestComputationNotWrittenError,
+    ShortInterestSourceUnavailableError,
+    short_interest,
+)
+from backend.features.factors.size import SIZE, size
 from backend.features.factors.value import (
     BOOK_TO_PRICE,
     EARNINGS_YIELD,
@@ -147,6 +196,7 @@ from backend.features.spec import FeatureSpec
 
 __all__ = [
     "ACCRUALS",
+    "AMIHUD_ILLIQUIDITY",
     "ASSET_GROWTH",
     "BASELINE_FACTORS",
     "BOOK_TO_PRICE",
@@ -159,13 +209,21 @@ __all__ = [
     "MOMENTUM_12_1",
     "PRICE_SOURCE_TABLE",
     "ROIC",
+    "SHORT_INTEREST",
+    "SHORT_INTEREST_AVAILABILITY_LAG",
+    "SHORT_INTEREST_TABLE",
     "SHORT_TERM_REVERSAL",
+    "SIZE",
+    "DollarVolumeSeries",
     "FundamentalsComputationNotWrittenError",
     "FundamentalsSourceUnavailableError",
     "PriceSeries",
     "PriceSeriesError",
     "PriceTemporalIntegrityError",
+    "ShortInterestComputationNotWrittenError",
+    "ShortInterestSourceUnavailableError",
     "accruals",
+    "amihud_illiquidity",
     "asset_growth",
     "book_to_price",
     "earnings_yield",
@@ -173,11 +231,14 @@ __all__ = [
     "low_volatility",
     "momentum_12_1",
     "roic",
+    "short_interest",
     "short_term_reversal",
+    "size",
 ]
 
 BASELINE_FACTORS: tuple[FeatureSpec, ...] = (
     ACCRUALS,
+    AMIHUD_ILLIQUIDITY,
     ASSET_GROWTH,
     BOOK_TO_PRICE,
     EARNINGS_YIELD,
@@ -185,7 +246,9 @@ BASELINE_FACTORS: tuple[FeatureSpec, ...] = (
     LOW_VOLATILITY,
     MOMENTUM_12_1,
     ROIC,
+    SHORT_INTEREST,
     SHORT_TERM_REVERSAL,
+    SIZE,
 )
 """Every declaration this package registers, sorted by name.
 

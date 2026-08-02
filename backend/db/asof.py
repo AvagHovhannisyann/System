@@ -83,6 +83,35 @@ are required:
   boundary, that the values *actually being sent* equal it
   (``backend.db._guard._verify_as_of_binds``). Both raise
   :class:`AsOfBindIntegrityError` and neither trusts the rewrite's output.
+
+Retractions on the read path (P2.10)
+------------------------------------
+
+A retraction row carries **no payload** — every payload column is NULL and
+the database refuses any other shape (:mod:`backend.db.bitemporal`). That
+makes handing one to a caller a type error as well as a semantic one, so it
+is refused twice more here rather than left to the masking predicate alone:
+
+- :func:`_assert_retraction_mask` re-derives, from the *rewritten statement*,
+  that every fact table the statement touches sits under a scope filtering
+  ``NOT is_retraction``, and raises :class:`RetractionMaskError` otherwise.
+  Same discipline as :func:`_assert_single_as_of_bind`: the rewriter's output
+  is verified, never assumed, so a future edit that drops or weakens the
+  predicate fails closed instead of quietly widening every read;
+- :func:`_refuse_loaded_retraction` is a row-level backstop on the ORM
+  ``load`` event: any bitemporal instance that arrives from the database
+  marked ``is_retraction`` raises :class:`RetractedFactError` before the
+  caller can touch it. It is path-independent — it does not care which query
+  produced the row — which is what makes it a genuine second line rather than
+  a restatement of the first.
+
+The one place a retraction instance is legitimately reachable is the writer
+that just built it: ``session.refresh`` after inserting one re-reads that
+physical row (the documented column-load exemption above) and fires
+``refresh``, not ``load``. Its payload attributes read as ``None`` there,
+which is the single case where the non-optional ``Mapped[...]`` annotations
+on payload columns state the *read path's* guarantee rather than a universal
+one. Stated here rather than left to be discovered.
 """
 
 from __future__ import annotations
@@ -93,8 +122,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 import sqlalchemy as sa
 from sqlalchemy import Select, TextClause, event, inspect, select
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Mapper, Session, aliased
+from sqlalchemy.sql import operators
 from sqlalchemy.sql.dml import UpdateBase
+from sqlalchemy.sql.elements import ColumnClause, UnaryExpression
+from sqlalchemy.sql.selectable import Subquery, TableClause
 
 from backend.db._guard import (
     AS_OF_BIND_KEY,
@@ -108,19 +140,17 @@ from backend.db._guard import (
     sanctioned_execution_options,
     scan_sql_text,
 )
-from backend.db.bitemporal import bitemporal_classes
+from backend.db.bitemporal import BitemporalMixin, bitemporal_classes
 from backend.db.engine import _get_session_factory, _get_writer_session_factory
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from sqlalchemy.ext.asyncio import AsyncSession
-    from sqlalchemy.orm import ORMExecuteState
+    from sqlalchemy.orm import ORMExecuteState, QueryContext
     from sqlalchemy.orm.util import AliasedClass, AliasedInsp
     from sqlalchemy.sql import ClauseElement
     from sqlalchemy.sql.elements import BindParameter
-
-    from backend.db.bitemporal import BitemporalMixin
 
 __all__ = [
     "AS_OF_INFO_KEY",
@@ -129,6 +159,8 @@ __all__ = [
     "AsOfTimestampError",
     "BitemporalBypassError",
     "BitemporalRewriteError",
+    "RetractedFactError",
+    "RetractionMaskError",
     "as_of",
     "ingest_writer_session",
 ]
@@ -138,6 +170,9 @@ AS_OF_INFO_KEY = "bitemporal_as_of"
 
 WRITER_INFO_KEY = "bitemporal_writer"
 """``Session.info`` key marking a session produced by :func:`ingest_writer_session`."""
+
+_RETRACTION_COLUMN = "is_retraction"
+"""The mixin column whose truth hides a fact from every later as-of read."""
 
 _REWRITE_NAME_PREFIX = "_bitemporal_"
 """Cosmetic name prefix for the rewrite's subqueries, for SQL readability only.
@@ -164,6 +199,27 @@ class BitemporalRewriteError(RuntimeError):
     does not support (user-``aliased()`` bitemporal entities, compound
     selects, or any residual raw table reference after rewriting), the hook
     raises. Nothing unversioned ever reaches the database (invariant I1).
+    """
+
+
+class RetractionMaskError(BitemporalRewriteError):
+    """A rewritten statement reaches a fact table without masking retractions.
+
+    Raised by :func:`_assert_retraction_mask` before execution. A retraction
+    carries no payload (P2.10), so a statement that can return one would hand
+    a caller a row of NULLs shaped like an observation — the read-path half of
+    the fabrication problem the storage constraints close. Fail-closed: the
+    statement is refused rather than executed with a partial mask.
+    """
+
+
+class RetractedFactError(RuntimeError):
+    """A retraction row reached application code as though it were a fact.
+
+    Raised by :func:`_refuse_loaded_retraction` at ORM load time, whatever
+    query produced the row. Reaching this is a defect in the read path, not a
+    condition callers handle: the as-of layer masks retractions and verifies
+    the mask, so a retraction arriving here means one of those failed.
     """
 
 
@@ -390,6 +446,157 @@ def _assert_single_as_of_bind(statement: Select[Any], as_of_ts: dt.datetime) -> 
         raise AsOfBindIntegrityError(msg)
 
 
+def _is_retraction_mask(element: object) -> bool:
+    """True when ``element`` is exactly the ``NOT is_retraction`` predicate.
+
+    Structural, not textual: ``~column`` on a ``Boolean`` compiles to a
+    :class:`~sqlalchemy.sql.elements.UnaryExpression` carrying the
+    ``is_false`` operator over the column, which is what
+    :func:`_versioned_entity` builds and therefore what this recognizes. A
+    hand-written ``is_retraction == False`` is deliberately *not* accepted:
+    this verifies the rewriter's own output against the one shape the
+    rewriter emits, so a change to that shape has to be seen rather than
+    absorbed.
+    """
+    return (
+        isinstance(element, UnaryExpression)
+        and element.operator is operators.is_false
+        and isinstance(element.element, ColumnClause)
+        and element.element.name == _RETRACTION_COLUMN
+    )
+
+
+def _masks_retractions(statement: Select[Any]) -> bool:
+    """True when this select's **own** WHERE clause carries the retraction mask.
+
+    The walk stops at nested ``Select``/``Subquery`` boundaries so an inner
+    scope's mask is never credited to an outer one — a correlated subquery
+    that happens to filter retractions says nothing about what its enclosing
+    select can return.
+    """
+    where = statement.whereclause
+    if where is None:
+        return False
+    stack: list[ClauseElement] = [where]
+    seen: set[int] = set()
+    while stack:
+        element = stack.pop()
+        if id(element) in seen:
+            continue
+        seen.add(id(element))
+        if _is_retraction_mask(element):
+            return True
+        if isinstance(element, Select | Subquery):
+            continue
+        stack.extend(element.get_children())
+    return False
+
+
+def _fact_tables_within(element: ClauseElement, table_names: frozenset[str]) -> frozenset[str]:
+    """Return every fact table reachable beneath ``element``, subqueries included.
+
+    Deliberately does **not** prune the rewriter's own subqueries the way
+    :func:`backend.db._guard.collect_references` does: the question here is
+    which fact tables a masked scope actually covers, and every one of them
+    sits inside exactly such a subquery.
+    """
+    found: set[str] = set()
+    stack: list[ClauseElement] = [element]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, TableClause):
+            if current.name in table_names:
+                found.add(current.name)
+            continue
+        if isinstance(current, ColumnClause) and current.table is not None:
+            stack.append(current.table)
+        stack.extend(current.get_children())
+    return frozenset(found)
+
+
+def _assert_retraction_mask(statement: Select[Any], touched_tables: frozenset[str]) -> None:
+    """Fail closed unless every touched fact table sits under a retraction mask.
+
+    The post-rewrite invariant for P2.10, checked on the statement itself
+    before it goes back to the ORM. For each ``Select`` in the rewritten tree
+    whose own WHERE carries ``NOT is_retraction``, the fact tables beneath it
+    are collected; the union must be exactly ``touched_tables``.
+
+    A missing table means some path to it can return retraction rows — rows
+    whose payload columns are all NULL by constraint — so the caller would
+    receive a hollow object shaped like an observation. Raises
+    :class:`RetractionMaskError`. Like :func:`_assert_single_as_of_bind` this
+    re-derives the property from the finished statement rather than trusting
+    that :func:`_versioned_entity` put the predicate there.
+    """
+    masked: set[str] = set()
+    stack: list[ClauseElement] = [statement]
+    seen: set[int] = set()
+    while stack:
+        element = stack.pop()
+        if id(element) in seen:
+            continue
+        seen.add(id(element))
+        if isinstance(element, Select) and _masks_retractions(element):
+            masked |= _fact_tables_within(element, touched_tables)
+        stack.extend(element.get_children())
+    unmasked = sorted(touched_tables - masked)
+    if unmasked:
+        msg = (
+            f"as-of rewrite left bitemporal table(s) {', '.join(unmasked)} reachable "
+            "without a NOT is_retraction mask; a retraction carries no payload (P2.10), "
+            "so such a row would reach the caller as an observation with NULL values. "
+            "Refusing to execute (fail-closed per I1/I3)"
+        )
+        raise RetractionMaskError(msg)
+
+
+@event.listens_for(Mapper, "load")
+def _refuse_loaded_retraction(
+    target: object,
+    context: QueryContext,  # noqa: ARG001 — MapperEvents API signature
+) -> None:
+    """Refuse to hand a freshly loaded retraction row to application code.
+
+    Row-level backstop, registered on the :class:`~sqlalchemy.orm.Mapper`
+    *class* so it covers every query on every session in the process,
+    including read paths written by later phases. A retraction that reaches
+    here has already defeated the masking predicate and
+    :func:`_assert_retraction_mask`, so :class:`RetractedFactError` is a
+    defect report, not a condition to handle.
+
+    ``is_retraction`` is read out of the loaded instance's attribute dict
+    rather than through the attribute, so a column-restricted load
+    (``load_only``) cannot make this guard emit a lazy SELECT from inside a
+    load event. Absent from the dict means the column was not selected, which
+    means the row cannot be shown to be a retraction here; enforcement for
+    that shape stays with the statement-level mask, which applies to
+    column-restricted loads exactly as it does to entity loads.
+
+    Fires on the initial load only. ``session.refresh`` of a row already in
+    the session dispatches ``refresh``, so the writer re-reading the
+    retraction it just inserted is unaffected (module docstring).
+    """
+    if not isinstance(target, BitemporalMixin):
+        return
+    state = cast("Any", inspect(target))
+    if state.dict.get(_RETRACTION_COLUMN) is not True:
+        return
+    table = cast("sa.Table", cast("Any", type(target)).__table__)
+    msg = (
+        f"a retraction row of {table.name} was loaded into application code: "
+        "retractions record that a fact is no longer believed and carry no payload "
+        "(every payload column is NULL by CHECK constraint, P2.10), so they must "
+        "never be returned as observations. Reads go through backend.db.as_of(), "
+        "which masks them (D-011/I1)"
+    )
+    raise RetractedFactError(msg)
+
+
 def _reject_textual_bitemporal(statement: TextClause, table_names: frozenset[str]) -> None:
     """Raise if textual SQL names a bitemporal table (fail-closed name scan).
 
@@ -439,10 +646,11 @@ def _enforce_bitemporal_reads(execute_state: ORMExecuteState) -> None:
       (fail-closed), verified by re-walking the rewritten statement for
       residual raw references. The rewritten statement must also carry
       exactly one as-of bind key holding exactly this session's as-of
-      (:func:`_assert_single_as_of_bind`), and the session's as-of travels
-      with the sanction as **ground truth** so the Core guard can re-check
-      the values actually sent at the cursor boundary — neither the shape nor
-      the value of the rewrite is taken on trust.
+      (:func:`_assert_single_as_of_bind`) and must mask retractions over
+      every fact table it touches (:func:`_assert_retraction_mask`), and the
+      session's as-of travels with the sanction as **ground truth** so the
+      Core guard can re-check the values actually sent at the cursor boundary
+      — neither the shape nor the value of the rewrite is taken on trust.
 
     Statements this hook finds clean are returned **unsanctioned** on
     purpose: the Core guard then judges them on their compiled SQL, so a
@@ -519,5 +727,6 @@ def _enforce_bitemporal_reads(execute_state: ORMExecuteState) -> None:
         )
         raise BitemporalRewriteError(msg)
     _assert_single_as_of_bind(rewritten, as_of_ts)
+    _assert_retraction_mask(rewritten, refs.plain)
     execute_state.statement = rewritten
     execute_state.update_execution_options(**sanctioned_execution_options(as_of_ts))

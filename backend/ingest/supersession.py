@@ -1,4 +1,9 @@
-"""Closing open-ended facts without an UPDATE (P3.1 — audit finding).
+"""Append-only version writing: closing intervals, and retracting facts.
+
+Two things a connector cannot do by hand in an append-only store, both of
+which produce a silent data defect when improvised: closing an open-ended
+interval (:func:`close_open_interval`, :func:`supersede_open_interval`) and
+withdrawing a fact it no longer believes (:func:`retract_fact`).
 
 The problem
 -----------
@@ -43,9 +48,26 @@ the ticker change, "open-ended" was what we honestly believed.
 version in one step, because doing only half of it is the bug above. Use it
 whenever a connector learns that an open-ended fact has ended.
 
-Both helpers return **new, unsaved ORM instances**; nothing here touches the
-database. The caller adds them in a single writer-session transaction so the
-close and the successor land atomically.
+Retractions
+-----------
+
+A **retraction** is the other half of the same idea: a later-knowledge version
+saying "we no longer believe this fact", written when a source withdraws a
+statement rather than restates it. Under D-011 it wins the latest-knowledge
+read from its ``knowledge_time`` on and hides the fact.
+
+It carries **no payload**. Every payload column of a retraction row is NULL,
+and the database refuses any other shape
+(``ck_<table>_retraction_payload_absent``, P2.10): a retraction that filled
+``close_usd`` with a number would be fabricated data sitting in a fact table,
+indistinguishable at the storage layer from a real quote (I3, directive §9.1).
+:func:`retract_fact` is the sanctioned constructor and cannot produce one —
+it copies the logical key and the valid interval, sets ``is_retraction``, and
+sets every payload column to SQL ``NULL`` explicitly.
+
+All three helpers return **new, unsaved ORM instances**; nothing here touches
+the database. The caller adds them in a single writer-session transaction so
+a close and its successor land atomically.
 """
 
 from __future__ import annotations
@@ -54,6 +76,7 @@ import datetime as dt
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import inspect
+from sqlalchemy.sql import null
 
 from backend.db.bitemporal import INFINITY, BitemporalMixin
 from backend.ingest.errors import SupersessionError
@@ -62,7 +85,7 @@ from backend.ingest.write import validate_knowledge_time
 if TYPE_CHECKING:
     from sqlalchemy.orm import Mapper
 
-__all__ = ["close_open_interval", "supersede_open_interval"]
+__all__ = ["close_open_interval", "retract_fact", "supersede_open_interval"]
 
 _DERIVED_COLUMNS = frozenset({"valid_from", "valid_to", "knowledge_time", "ingested_at"})
 """Columns the helpers set themselves; never copied verbatim from the source row.
@@ -176,6 +199,86 @@ def close_open_interval[RowT: BitemporalMixin](
         knowledge_time=knowledge_time,
     )
     return type(open_row)(**values)
+
+
+def retract_fact[RowT: BitemporalMixin](
+    row: RowT,
+    *,
+    knowledge_time: dt.datetime,
+    now: dt.datetime | None = None,
+) -> RowT:
+    """Build the retraction version that withdraws a fact we no longer believe.
+
+    The returned row repeats ``row``'s logical key and its event-time interval
+    exactly — that is how it addresses the fact — carries ``is_retraction =
+    True`` and a strictly later ``knowledge_time``, and holds **no payload**:
+    every payload column is set to SQL ``NULL``.
+
+    The payload is null rather than copied, zeroed, or left to a default
+    because a retraction states nothing about value. A number in those columns
+    would be fabricated data inside a fact table, unable to be told apart from
+    an observation at the storage layer (I3, directive §9.1); a database CHECK
+    refuses it on every write path, and this constructor cannot express it.
+    SQL ``NULL`` is used explicitly rather than Python ``None`` so a column
+    with a default (``macro_observation.is_missing`` defaults to ``false``)
+    cannot fill itself in when the row is inserted.
+
+    Under D-011's read semantics the retraction wins for every ``as_of`` at or
+    after ``knowledge_time`` and the fact is invisible from then on; earlier
+    as-of queries still see the fact, which is exactly right — before the
+    source withdrew it, we believed it. To re-assert the fact later, write a
+    normal version with a still-later ``knowledge_time``.
+
+    Args:
+        row: the version being withdrawn — typically the currently winning
+            one. Not modified; only its logical key, ``valid_from``,
+            ``valid_to`` and ``knowledge_time`` are read.
+        knowledge_time: when we learned the fact was withdrawn, timezone-aware
+            UTC. Must be strictly later than ``row.knowledge_time``.
+        now: reference instant for the future-knowledge-time check; defaults
+            to the current UTC time. Injected by tests.
+
+    Returns:
+        A new unsaved instance of ``type(row)``. The caller writes it through
+        the ingestion writer session.
+
+    Raises:
+        SupersessionError: if ``row`` is itself a retraction (the fact is
+            already withdrawn; retracting it twice would record a belief
+            change that did not happen), or if ``knowledge_time`` is not
+            strictly later than ``row``'s (an equal value collides on the
+            primary key, an earlier one would never win the latest-knowledge
+            read).
+        TypeError: if ``knowledge_time`` is naive.
+        FutureKnowledgeTimeError: if ``knowledge_time`` is in the future.
+    """
+    _require_aware(knowledge_time, "knowledge_time")
+    validate_knowledge_time(
+        knowledge_time, context=f"retract_fact({type(row).__name__})", now=now
+    )
+    if row.is_retraction:
+        msg = (
+            f"{type(row).__name__} version is already a retraction (knowledge_time "
+            f"{row.knowledge_time.isoformat()}); the fact is not currently believed and "
+            "there is nothing to withdraw. Re-assert it with a later knowledge_time first"
+        )
+        raise SupersessionError(msg)
+    if knowledge_time <= row.knowledge_time:
+        msg = (
+            f"knowledge_time {knowledge_time.isoformat()} must be strictly later than the "
+            f"retracted row's {row.knowledge_time.isoformat()}: an equal value collides on "
+            "the primary key, an earlier one would never win the latest-knowledge read"
+        )
+        raise SupersessionError(msg)
+    values: dict[str, Any] = {name: getattr(row, name) for name in row.__bitemporal_key__}
+    values.update({name: null() for name in type(row).__bitemporal_payload__})
+    values.update(
+        valid_from=row.valid_from,
+        valid_to=row.valid_to,
+        knowledge_time=knowledge_time,
+        is_retraction=True,
+    )
+    return type(row)(**values)
 
 
 def supersede_open_interval[RowT: BitemporalMixin](
