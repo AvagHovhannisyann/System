@@ -109,7 +109,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P4.1 | PIT universe builder: ADV floor, price floor, market-cap floor, borrow-availability filter, exchange filter; all inputs read through `as_of()`; per-rebalance-date snapshots persisted | G3 | L | TODO |
+| P4.1 | PIT universe builder: ADV floor, price floor, market-cap floor, borrow-availability filter, exchange filter; all inputs read through `as_of()`; per-rebalance-date snapshots persisted | G3 | L | WIP — criteria/errors/snapshot committed untested; builder+migration 0011 in progress |
 | P4.2 | Historical reconstruction + size/turnover series + filter-impact waterfall data | P4.1 | M | TODO |
 | P4.3 | [UI] Universe page: constituents w/ entry/exit, size & turnover history, filter waterfall, PIT browser (pick any past date) | P4.2 | L | TODO |
 | P4.4 | **Gate G4:** past universe contains later-delisted names (test); size/turnover history rendered and manually inspected — inspection notes to `PROGRESS.md` | P4.2 | S | TODO |
@@ -118,9 +118,9 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P5.1 | Feature framework: declaration schema (name, definition, **units**, availability lag, source tables), registry with **hard 30-feature cap** (enforced in code + test), lag enforcement in the compute path | G4 | L | TODO |
-| P5.2 | Transform pipeline: winsorize 1/99 → cross-sectional z-score → sector neutralize → optional beta neutralize; property-tested (idempotence, NaN policy, no cross-date leakage) | P5.1 | L | TODO |
-| P5.3 | Baseline factors: momentum 12-1, book-to-price, earnings yield, gross profitability, ROIC, accruals, asset growth, low volatility, size, short interest, Amihud illiquidity — each with docstring stating units + assumptions | P5.1, P5.2 | XL (split per-factor at start) | TODO |
+| P5.1 | Feature framework: declaration schema (name, definition, **units**, availability lag, source tables), registry with **hard 30-feature cap** (enforced in code + test), lag enforcement in the compute path | G4 | L | WIP — modules committed untested; test suite in progress |
+| P5.2 | Transform pipeline: winsorize 1/99 → cross-sectional z-score → sector neutralize → optional beta neutralize; property-tested (idempotence, NaN policy, no cross-date leakage) | P5.1 | L | WIP — modules committed untested; test suite in progress |
+| P5.3 | Baseline factors: momentum 12-1, book-to-price, earnings yield, gross profitability, ROIC, accruals, asset growth, low volatility, size, short interest, Amihud illiquidity — each with docstring stating units + assumptions | P5.1, P5.2 | XL (split per-factor at start) | WIP — in progress |
 | P5.4 | Factor premia validation harness: long-sample sign + magnitude check per factor vs published stylized facts | P5.3 | L | TODO |
 | P5.5 | [UI] Features page: catalog (definitions, lags, coverage), correlation heatmap, rolling IC, distributions, enable/disable toggles writing versioned config (CC.1 events, never mutating a live model) | P5.3 | L | TODO |
 | P5.6 | **Gate G5:** premia reproduce; correlation matrix reviewed (notes to `PROGRESS.md`); lookahead test per feature | P5.4 | M | TODO |
@@ -170,7 +170,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | P9.1 | Ledoit-Wolf shrinkage covariance; PSD + shrinkage-intensity property tests | G8 | M | DONE |
 | P9.2 | [ER] cvxpy optimizer: max ER − risk penalty − **explicit turnover penalty**; sector & beta neutrality, 2% position cap, 20% sector cap, full investment; infeasibility diagnosis + documented relaxation ladder | P9.1 | XL (split at start) | DONE (2026-08-01, see PROGRESS) |
 | P9.3 | Cost model: half-spread + commission + sqrt-impact (order size / ADV) + borrow on shorts; **units in bps documented on every function**; conservative defaults flagged `UNCALIBRATED` until calibrated from paper fills (P11.8 owns clearing the flag) | G8 | L | DONE |
-| P9.4 | Hypothesis suites: optimizer constraint satisfaction on random inputs; cost-model monotonicity/scaling properties | P9.2, P9.3 | L | TODO |
+| P9.4 | Hypothesis suites: optimizer constraint satisfaction on random inputs; cost-model monotonicity/scaling properties | P9.2, P9.3 | L | WIP — suites green (45 tests); found 2 defects, see D-025 |
 | P9.5 | [UI] Portfolio page: current vs target, drift, sector/factor exposures, planned trades w/ est. cost, constraint-binding indicators | P9.2 | L | TODO |
 | P9.6 | **Gate G9:** optimizer solves across historical dates; turnover-penalty A/B in backtest shows reduced realized turnover; uncalibrated-cost flag visible | P9.4 | M | TODO |
 
