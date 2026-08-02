@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 from dataclasses import replace
 
 import pytest
 
+from backend.execution import lifecycle
 from backend.execution.errors import (
+    ExecutionError,
     FillAccountingError,
     IllegalTransitionError,
     TerminalOrderError,
@@ -375,3 +379,79 @@ def test_replay_refuses_an_overfilled_history() -> None:
     ]
     with pytest.raises(TransitionChainError, match="past the ordered 100"):
         replay(broken, ordered_quantity_shares=100)
+
+
+def _patched_tables(
+    patch: pytest.MonkeyPatch,
+    legal: dict[tuple[OrderState, OrderEvent], OrderState],
+) -> None:
+    """Install ``legal`` as the transition table with a matching complement.
+
+    The complement is recomputed so the guard reaches the check under test
+    rather than tripping on the partition check first — the tables would
+    otherwise overlap or leave pairs unclassified.
+    """
+    complement = {
+        (state, event): TransitionRefusal.TERMINAL_STATE
+        for state in OrderState
+        for event in OrderEvent
+        if (state, event) not in legal
+    }
+    patch.setattr(lifecycle, "TRANSITIONS", legal)
+    patch.setattr(lifecycle, "ILLEGAL_TRANSITIONS", complement)
+
+
+def test_the_consistency_guard_refuses_a_terminal_state_with_an_exit() -> None:
+    # The guard runs at import, so a suite that only imports a *correct* module
+    # never exercises it. Called directly here against a table that gives FILLED
+    # an outgoing edge — the shape it exists to refuse.
+    broken = dict(TRANSITIONS)
+    broken[OrderState.FILLED, OrderEvent.RELEASE] = OrderState.PENDING_NEW
+    with pytest.MonkeyPatch.context() as patch:
+        _patched_tables(patch, broken)
+        with pytest.raises(ExecutionError, match="terminal states have outgoing transitions"):
+            lifecycle._verify_table_consistency()
+
+
+def test_the_consistency_guard_refuses_a_non_terminal_state_with_no_way_out() -> None:
+    # A state nothing can leave is a lifecycle nobody implemented, and it looks
+    # identical to a working one in a blotter that never shows the state.
+    broken = {
+        pair: target
+        for pair, target in TRANSITIONS.items()
+        if pair[0] is not OrderState.PENDING_NEW
+    }
+    with pytest.MonkeyPatch.context() as patch:
+        _patched_tables(patch, broken)
+        with pytest.raises(ExecutionError, match="no outgoing transition"):
+            lifecycle._verify_table_consistency()
+
+
+def test_the_consistency_guard_refuses_tables_that_do_not_partition_every_pair() -> None:
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(lifecycle, "ILLEGAL_TRANSITIONS", dict(TRANSITIONS))
+        with pytest.raises(ExecutionError, match="both legal and illegal"):
+            lifecycle._verify_table_consistency()
+
+
+def test_the_refusal_builder_refuses_an_unclassified_pair() -> None:
+    # The other import-time guard: an illegal pair with no rule naming it is a
+    # transition nobody decided about, and the build fails rather than letting
+    # it acquire a silent default.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(lifecycle, "_refusal", lambda state, event: None)  # noqa: ARG005
+        with pytest.raises(ExecutionError, match="no refusal rule classifies it"):
+            lifecycle._build_illegal_transitions()
+
+
+def test_both_import_time_guards_actually_run_at_import() -> None:
+    # Exercising a guard directly proves it works; this proves it is wired in.
+    # A module that stopped calling either would otherwise pass every test above
+    # — the mutation sweep found exactly that gap.
+    module = ast.parse(inspect.getsource(lifecycle))
+    called: set[str] = set()
+    for node in ast.walk(module):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            called.add(node.func.id)
+    assert "_verify_table_consistency" in called
+    assert "_build_illegal_transitions" in called

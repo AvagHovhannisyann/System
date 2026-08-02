@@ -27,10 +27,11 @@ deliberately **not** skipped or xfailed (I6): a skipped test reports success it
 did not earn, and the next environment with a working daemon must see these run
 and either pass or fail on their merits.
 
-Migration 0014 declares ``down_revision = "0013"``. Until revision 0013 lands
-from its own track, ``alembic upgrade head`` cannot resolve the chain and this
-module fails at the fixture rather than at an assertion — also on purpose, and
-also not skipped.
+Migration 0014 declares ``down_revision = "0013"`` and depends on that revision by
+identifier alone. Revision 0013 has since landed from its own track, so the chain
+is linear with a single head at 0014 — but the dependency was written before it
+existed and would have failed at the fixture rather than at an assertion, which
+is the correct shape for a cross-track dependency and is also not skipped.
 """
 
 from __future__ import annotations
@@ -236,7 +237,11 @@ async def test_every_persisted_fill_is_labelled_a_lower_bound() -> None:
                 {"order_id": order_id},
             )
         ).all()
-    assert rows == [("simulated", "lower_bound")]
+    # Compared as plain tuples: a Row is tuple-like at runtime but is not a
+    # tuple to the type checker, so the direct comparison is one mypy --strict
+    # rejects as non-overlapping. Since these tests cannot run without a Docker
+    # daemon, a silently always-false assertion here would go unnoticed.
+    assert [tuple(row) for row in rows] == [("simulated", "lower_bound")]
 
 
 async def test_the_order_row_records_the_reproducibility_stamp() -> None:

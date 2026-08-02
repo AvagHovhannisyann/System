@@ -145,7 +145,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | P7.4 | Delta-oriented extraction tasks: risk-factor language change, guidance tone vs magnitude, Q&A evasiveness, accounting-language shift, added/removed risk factors | P7.3 | XL (split per-task at start) | TODO |
 | P7.5 | Ensemble: 2–3 cost-tier models, parallel calls, median aggregation, disagreement score, review flag above threshold. **Backfill is pilot-gated: 200 names / 5 years / 2-model ensemble until Phase 8 proves incremental IC over the P5 baseline (D-015)** — the pilot is a ledger row | P7.3, B4 | L | BLOCKED(B4) |
 | P7.6 | Cache keyed `hash(document + prompt_version + model)`; prompt change auto-invalidates affected documents | P7.3 | M | DONE (2026-08-01, see PROGRESS) |
-| P7.7 | Cost governor: per-provider daily+monthly caps enforced **before** each call; halt vs degrade-to-cheaper-model behavior; spend tracking | P7.5 | L | TODO |
+| P7.7 | Cost governor: per-provider daily+monthly caps enforced **before** each call; halt vs degrade-to-cheaper-model behavior; spend tracking | P7.5 | L | DONE (2026-08-02) — 101 tests, 17/17 mutations; live enforcement still BLOCKED(B4): no keys, caps or prices configured. See D-032 |
 | P7.8 | Golden set harness: storage, scoring, per-prompt-version score history, **blind re-label mode** (same document served without prior label, for the intra-rater measurement) and **single-construct-across-all-documents** ordering — never all constructs per document (D-014, B3 protocol). Labels are human — B3 | P7.4 | L | BLOCKED(B3 for labels; harness TODO) |
 | P7.9 | Contamination probe: anonymized-vs-named scoring divergence, threshold, wired into CI as deploy gate | P7.5 | L | TODO |
 | P7.10 | Prompt management: content-addressed versions, history, diff data, golden-score attachment, rollback | P7.3 | L | DONE (2026-08-01, see PROGRESS) |
@@ -192,7 +192,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
 | P11.1 | IBKR paper adapter via `ib_insync`: **paper endpoint hard-coded** (port 7497/paper gateway only; no live config path — I-check test asserts no such flag exists in codebase), needs B2 creds | G10, B2 | L | BLOCKED(B2) |
-| P11.2 | OMS: order lifecycle, idempotency keys, persistence | P11.1 | L | TODO |
+| P11.2 | OMS: order lifecycle, idempotency keys, persistence | P11.1 | L | DONE (2026-08-02) — 195 tests, 56/56 mutations; paper-only structural, see D-033. Integration (25 tests) unrun: no Docker |
 | P11.3 | Reconciliation each cycle: positions/cash vs broker; mismatch ⇒ halt + alert | P11.2 | L | TODO |
 | P11.4 | VWAP/TWAP slicing | P11.2 | M | TODO |
 | P11.5 | Kill switch: drawdown breach, stale data, reconciliation mismatch, manual trigger; halts within one cycle | P11.3 | L | TODO |
@@ -205,7 +205,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
 | P12.1 | Live-vs-expected vs CPCV distribution; auto-halt outside expected band | G11 | L | TODO |
-| P12.2 | Feature drift via PSI | G10 | M | TODO |
+| P12.2 | Feature drift via PSI | G10 | M | DONE (2026-08-02) — 252 tests, 17/17 mutations; see D-031 |
 | P12.3 | Extraction-quality drift on golden set | G7 | M | TODO |
 | P12.4 | Alerting: rules, delivery, acknowledgement, halt history | P12.1 | M | TODO |
 | P12.5 | [UI] Monitoring page + finalize Overview (live-vs-expected w/ CPCV bands, drawdown vs limit, health tiles, alerts, next job, spend vs cap) | P12.1–P12.4 | L | TODO |

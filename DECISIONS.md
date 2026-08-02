@@ -911,3 +911,43 @@ reads as protection that does not exist.
 **I3 on prices:** `CATALOG_PRICES` is an explicitly empty mapping and every lookup raises
 `ModelPriceUnknownError`. There is no average, no cheapest-configured, no zero fallback — a
 cap enforced against a made-up price enforces nothing.
+
+## D-033 — Order lifecycle: paper-only with no seam, and idempotency from content (P11.2, 2026-08-02)
+
+**Paper-only is six independent structural facts, none of them a switch.** The one that
+actually closes the door the brief warned about — "a slot where a live endpoint could later
+be dropped in by configuration" — is that **no function anywhere in the package takes a
+parameter named** `venue`, `adapter`, `broker`, `client`, `endpoint`, `host`, `port`,
+`transport`, `url`, `settings` or `live`. Asserted from the AST *and* again through
+`inspect.signature` on the runtime objects. There is nothing to configure a live endpoint
+into. Alongside: no transport imports at all (token-scanned, strings and comments dropped);
+no `Protocol`/`ABC`/`Callable`/`import_module` routing seam; `ExecutionVenue` has exactly
+one member, so a second is a code change plus a migration; `OrderIntent` takes no venue
+argument and the column has a server default under `CHECK (venue = 'paper')`, so no writer —
+ORM, raw `INSERT`, or `COPY` — can set it.
+
+**A live fill has no representation.** `FillSource` is `SIMULATED` or `PAPER_BROKER` and
+nothing else, bound in SQL by CHECK. That is I3 at the schema: a simulated fill and a
+paper-broker fill are *distinct values on the row*, and a real one is not a value at all.
+D-013 rides along as `fill_cost_basis = 'lower_bound'` under its own CHECK — a label that
+travels into every query and export rather than living in a document, so P11.8 cannot
+relabel a paper fill as a calibrated estimate without a migration.
+
+**The idempotency key is content, never an identifier.** SHA-256 over canonical JSON of the
+order's own fields *plus all four I2 stamp components*. Every timestamp, counter, UUID and
+attempt number is excluded, and the reason is the failure it prevents: a counter must be
+*remembered* across the retry, so the worker that restarted mints a new one and sends the
+order twice. Content means the retry recomputes the identical key with nothing to remember.
+The limit price renders at fixed scale so `Decimal("1.5")` and `Decimal("1.50")` cannot
+produce two keys. Uniqueness is enforced by the database; `record_order` deliberately does
+not look before it inserts, but inserts inside a savepoint and lets the constraint decide.
+
+**`execution_order` has no state column.** Append-only tables cannot update one, and a
+denormalized state that drifts from its history is exactly the condition the log exists to
+prevent. Current state is `replay()` over the transition table, which validates the chain on
+the way through.
+
+**Two pending-cancel states, so the table stays a pure function of `(state, event)`.** A
+venue's cancel-*rejection* must return the order to where it actually was; with a single
+pending-cancel state that target depends on cumulative filled quantity, which would make the
+machine a function of its own arithmetic.

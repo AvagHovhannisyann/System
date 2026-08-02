@@ -78,7 +78,6 @@ from backend.execution.idempotency import (
 )
 from backend.execution.lifecycle import (
     FILL_EVENTS,
-    INITIAL_STATE,
     OrderEvent,
     OrderState,
     Transition,
@@ -676,14 +675,3 @@ async def append_transition(
     except IntegrityError as exc:
         raise ConcurrentTransitionError(order_id=order_id, sequence_number=sequence_number) from exc
     return row
-
-
-def initial_state() -> OrderState:
-    """Return the state a freshly recorded order is in.
-
-    A function rather than a re-export so callers do not reach into
-    :mod:`backend.execution.lifecycle` for a value the store is authoritative
-    about: :func:`record_order` writes no transition, so the order's history is
-    empty and replays to this state.
-    """
-    return INITIAL_STATE

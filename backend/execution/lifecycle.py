@@ -659,7 +659,7 @@ def replay(
     filled = 0
     for index, transition in enumerate(transitions, start=1):
         _require_chain(
-            True,
+            transition.sequence_number == index,
             f"transition at position {index} carries sequence_number "
             f"{transition.sequence_number}; a history's sequence numbers are 1..n with no "
             f"gaps, so a mismatch means a row is missing, duplicated or out of order",
