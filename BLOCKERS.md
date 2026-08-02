@@ -150,3 +150,21 @@ may be marked GATE-PASSED on the backend half alone** (directive §9.10).
 **Needed from the human:** hand the nine `[UI]` tasks to Fabel, or explicitly re-scope
 the two gates' inspection clauses. The backend exposes the data through the API either
 way, so the two tracks are independent and can proceed in parallel.
+
+### B1 escalation (2026-08-02) — it now blocks Phase 4 *entirely*, not just full-data runs
+
+P4.1 landed and the scope of B1 is wider than the original entry says. `UniverseCriteria`
+makes a strictly positive **market-cap floor mandatory**, and the shares-outstanding source
+is the Sharadar SF1 feed nobody has purchased yet. So **every `build_universe` call refuses
+before reading anything**, with `UniverseInputUnavailableError(blocker="B1")`. Phase 4's
+code and its 224 tests are complete; Phase 4 cannot produce a single universe.
+
+The borrow screen refuses on **B2** (no locate feed; B1's decision rescoped borrow to IBKR
+in Phase 11), so `require_borrow=True` is unavailable for the same structural reason.
+
+**G4 now needs three things, not one:** (a) B1 resolved so a universe can be built at all;
+(b) a Docker daemon, so `backend/tests/integration/test_universe_db.py` (20 tests, written
+and *not* skipped) can actually run — migration 0011's runtime behaviour is currently
+unverified, only its structural match to the ORM; (c) B6's UI half, since G4's binary
+condition names size/turnover history *rendered and manually inspected*.
+`UniverseHistory.report()` supplies the programmatic half.

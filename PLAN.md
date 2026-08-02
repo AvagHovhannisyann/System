@@ -109,8 +109,8 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P4.1 | PIT universe builder: ADV floor, price floor, market-cap floor, borrow-availability filter, exchange filter; all inputs read through `as_of()`; per-rebalance-date snapshots persisted | G3 | L | WIP — criteria/errors/snapshot committed untested; builder+migration 0011 in progress |
-| P4.2 | Historical reconstruction + size/turnover series + filter-impact waterfall data | P4.1 | M | TODO |
+| P4.1 | PIT universe builder: ADV floor, price floor, market-cap floor, borrow-availability filter, exchange filter; all inputs read through `as_of()`; per-rebalance-date snapshots persisted | G3 | L | DONE (2026-08-02) — 224 tests; refuses on B1 until fundamentals land, see D-026 |
+| P4.2 | Historical reconstruction + size/turnover series + filter-impact waterfall data | P4.1 | M | DONE (2026-08-02) — history, size/turnover, waterfall; 224-test suite shared with P4.1 |
 | P4.3 | [UI] Universe page: constituents w/ entry/exit, size & turnover history, filter waterfall, PIT browser (pick any past date) | P4.2 | L | TODO |
 | P4.4 | **Gate G4:** past universe contains later-delisted names (test); size/turnover history rendered and manually inspected — inspection notes to `PROGRESS.md` | P4.2 | S | TODO |
 
