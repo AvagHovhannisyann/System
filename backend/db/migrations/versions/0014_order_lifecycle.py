@@ -268,9 +268,7 @@ def upgrade() -> None:
             name="from_state_not_terminal",
         ),
         sa.CheckConstraint(_LEGAL_TRANSITIONS_SQL, name="legal_transition"),
-        sa.CheckConstraint(
-            "filled_quantity_after_shares >= 0", name="filled_quantity_after_non_negative"
-        ),
+        sa.CheckConstraint("filled_quantity_after_shares >= 0", name="filled_after_non_negative"),
         # D-030 shape, both directions: the payload is present exactly on fill
         # events and absent on every other. A non-fill row carrying a quantity
         # would be a trade nobody reported; a fill row missing one would be a

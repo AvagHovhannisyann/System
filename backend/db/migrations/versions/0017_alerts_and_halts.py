@@ -252,7 +252,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["resolves_halt_event_id"],
             ["monitoring_halt_event.halt_event_id"],
-            name="fk_monitoring_halt_event_resolves_halt_event_id_monitoring_halt_event",
+            name="fk_monitoring_halt_event_resolves",
             ondelete="RESTRICT",
         ),
         # A halt is resumed at most once. NULLs are distinct in Postgres, so halt

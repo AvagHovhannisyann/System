@@ -970,7 +970,7 @@ class ExtractionPromptActivation(Base):
         # reader walks to reconstruct which version was in force when.
         CheckConstraint(
             "(sequence = 1) = (previous_version_hash IS NULL)",
-            name="first_activation_has_no_predecessor",
+            name="first_activation_no_predecessor",
         ),
     )
 
@@ -1845,7 +1845,7 @@ class ExecutionOrderTransition(Base):
         ),
         CheckConstraint(
             "filled_quantity_after_shares >= 0",
-            name="filled_quantity_after_non_negative",
+            name="filled_after_non_negative",
         ),
         # D-030 shape, both directions. Present on a fill:
         CheckConstraint(
@@ -3071,7 +3071,17 @@ class MonitoringHaltEvent(Base):
     )
     resolves_halt_event_id: Mapped[int | None] = mapped_column(
         BigInteger,
-        ForeignKey("monitoring_halt_event.halt_event_id", ondelete="RESTRICT"),
+        # Named explicitly. The convention's fk template is
+        # fk_<table>_<column>_<referred table>, and for a *self*-referential key
+        # the table name appears twice, giving 69 characters against
+        # PostgreSQL's 63-byte identifier limit. SQLAlchemy raises
+        # IdentifierError while rendering the metadata, so it takes down every
+        # test that touches Base.metadata, not merely this table.
+        ForeignKey(
+            "monitoring_halt_event.halt_event_id",
+            ondelete="RESTRICT",
+            name="fk_monitoring_halt_event_resolves",
+        ),
         nullable=True,
         doc="On a resume, the halt it clears. UNIQUE, so a halt is resumed at most once.",
     )

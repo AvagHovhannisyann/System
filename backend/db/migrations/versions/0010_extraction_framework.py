@@ -157,7 +157,7 @@ def upgrade() -> None:
         # the chain a reader walks to reconstruct what was in force when.
         sa.CheckConstraint(
             "(sequence = 1) = (previous_version_hash IS NULL)",
-            name="first_activation_has_no_predecessor",
+            name="first_activation_no_predecessor",
         ),
     )
     op.create_table(
