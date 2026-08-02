@@ -685,3 +685,46 @@ suite asserting the cutoff against an independently stated expected instant. A t
 recomputes the formula it is checking cannot see a sign error in that formula.
 `test_the_availability_lag_moves_the_cutoff_backwards_and_never_forwards` now pins the
 direction against literals for that reason.
+
+## D-028 — Overflow in a cross-sectional transform is a data condition, not a number (2026-08-02)
+
+**What was wrong.** `cross_sectional_zscore` guarded only the *bottom* of the float64
+range. `np.std` averages *squared* deviations, so a cross-section with spread above
+~1.3e154 overflows to `inf`, and `(x - mean) / inf` returned `[-0., -0., 0., 0.]` —
+"every security is precisely average". Finite, plausible, silent, and the exact output the
+function's own docstring says it refuses to produce. `neutralize` and `beta_neutralize`
+had the mirror defect, emitting `±inf`; worse, the module *rejects* infinite inputs, so
+passing that output to the next stage raised a `ValueError` blaming a caller who had
+supplied nothing infinite.
+
+**Decision.** An overflow is a fact about the arithmetic on one date, so it is a **data
+condition: NaN — never `inf`, never `0.0`.** Two helpers in `_stats.py` implement it:
+`statistics_are_representable()` (a non-finite summary statistic voids the whole date) and
+`nan_where_overflowed()` (per-entry, where only some results overflowed). NaN already
+means "not available" everywhere else in the pipeline, so downstream code needs no new
+case.
+
+**`numpy`'s overflow `RuntimeWarning` is deliberately left unsuppressed.** It is a truthful
+signal that a date reached the edge of float64; silencing it inside the library would hide
+the condition from the operator. It fires only on genuine overflow, which real feature data
+does not reach.
+
+**Two guards were added and then deleted, on I6 grounds.** A mutation harness showed no
+input can distinguish the guarded from the unguarded version across 60,000 extreme-magnitude
+cases: a zero regression denominator is unreachable past the dispersion check, because it is
+the same sum `np.std(…, ddof=1)` takes and `0 <= tolerance * scale` holds for every
+non-negative scale. Unreachable code is untested code; the reasoning survives as a comment
+where the guard was.
+
+**Three docstring claims were false and are corrected.** (1) "Standard deviation is at most
+1" after the full pipeline — it is not; a singleton sector drops the name carrying the
+spread and *stretches* the survivors (measured 1.25). (2) The projection inequality does
+not chain across steps: a later step can drop the name that absorbed an earlier step's
+energy. (3) The z-score idempotence gap is `eps · κ` where `κ = max|x| / σ`, not `eps` —
+measured at 5.1e-6 for κ=5.7e10, and the module accepts κ up to 1e12.
+
+**`transform_cross_section` is NOT idempotent**, and not merely as a floating-point caveat.
+Two independent mechanisms, each with its own counterexample: re-standardizing rescales
+(`twice == once / σ_once`, with **ranks unchanged**, which is why it is easy to miss), and
+the two projections do not commute — beta neutralization puts a sector bet back that sector
+demeaning had removed.

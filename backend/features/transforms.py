@@ -532,9 +532,10 @@ def beta_neutralize(
         :data:`ZERO_DISPERSION_RELATIVE_TOLERANCE`): the design matrix
         ``[1, beta]`` is then rank deficient, the slope is not identified, and
         "beta neutral" is not a claim that can be made from a cross-section in
-        which every name has the same beta. The same ``NaN`` is returned when
-        any of the fit's statistics overflows ``float64``, and per entry where
-        a residual does; an infinity is never returned.
+        which every name has the same beta. The same whole-array ``NaN`` comes
+        back when the present betas' own statistics overflow ``float64``, and a
+        per-entry ``NaN`` wherever a residual does; an infinity is never
+        returned.
 
     Raises:
         ValueError: if the two arrays differ in length, if either is not a
