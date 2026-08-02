@@ -42,7 +42,7 @@ from backend.features.errors import (
     FeatureComputeError,
     FeatureError,
 )
-from backend.features.factors import FUNDAMENTALS_TABLE, PRICE_SOURCE_TABLE
+from backend.features.factors import BASELINE_FACTORS, FUNDAMENTALS_TABLE, PRICE_SOURCE_TABLE
 from backend.features.factors._fundamentals import (
     FUNDAMENTALS_BLOCKER,
     FUNDAMENTALS_CONNECTOR_TASK,
@@ -59,7 +59,7 @@ from backend.features.factors.liquidity import (
 )
 from backend.features.factors.size import SIZE, size
 from backend.features.registry import default_registry
-from backend.features.spec import compute_instant
+from backend.features.spec import MAX_FEATURES, compute_instant
 from backend.tests.features.factors.store import midnight_utc
 from backend.tests.features.factors.volume_store import (
     FixtureVolumeBar,
@@ -772,3 +772,58 @@ def test_the_price_leg_alone_is_declared_insufficient() -> None:
 def test_the_compute_instant_convention_is_unchanged_by_these_two_factors() -> None:
     """Sanity anchor: the cutoffs above are midnight opening the compute date, less the lag."""
     assert compute_instant(COMPUTE_DATE).isoformat() == "2026-03-02T00:00:00+00:00"
+
+
+# ---------------------------------------------------------------------------
+# The catalog, now that P5.3's library is complete
+# ---------------------------------------------------------------------------
+
+PLANNED_FACTORS = [
+    "accruals",
+    "amihud_illiquidity",
+    "asset_growth",
+    "book_to_price",
+    "earnings_yield",
+    "gross_profitability",
+    "low_volatility",
+    "momentum_12_1",
+    "roic",
+    "short_interest",
+    "short_term_reversal",
+    "size",
+]
+"""Every factor the library registers, written out by hand.
+
+``PLAN.md`` P5.3 and directive §5 Phase 5 name eleven; the twelfth is
+``short_term_reversal``, which is the complement of the month ``momentum_12_1``
+skips and was added alongside it (:mod:`backend.features.factors.momentum`
+explains why the two belong together). The list is spelled out here rather than
+derived from the package, so that registering a factor nobody decided to add is a
+test failure rather than an import side effect.
+"""
+
+
+def test_the_catalog_holds_exactly_the_planned_factors() -> None:
+    """P5.3's baseline library is complete: no more and no fewer."""
+    assert [spec.name for spec in BASELINE_FACTORS] == PLANNED_FACTORS
+
+
+def test_the_catalog_tuple_is_sorted_by_name_like_the_registry() -> None:
+    """``BASELINE_FACTORS`` enumerates the way ``FeatureRegistry.specs()`` does.
+
+    A catalog that reads differently from the registry it describes is a catalog
+    that will drift from it.
+    """
+    assert [spec.name for spec in BASELINE_FACTORS] == sorted(PLANNED_FACTORS)
+
+
+def test_the_twelve_factors_fit_inside_the_thirty_feature_cap() -> None:
+    """Directive §5: the cap includes Phase 7's LLM features, so headroom is the finding."""
+    registry = default_registry()
+    assert len(BASELINE_FACTORS) == 12
+    assert set(PLANNED_FACTORS) <= set(registry.names())
+    assert len(registry) <= MAX_FEATURES
+    assert registry.remaining_capacity() == MAX_FEATURES - len(registry)
+    # Every baseline factor is now registered, so what is left is Phase 7's
+    # budget. Eighteen slots for LLM-derived features against the same cap.
+    assert registry.remaining_capacity() >= 18

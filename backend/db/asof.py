@@ -492,62 +492,49 @@ def _masks_retractions(statement: Select[Any]) -> bool:
     return False
 
 
-def _fact_tables_within(element: ClauseElement, table_names: frozenset[str]) -> frozenset[str]:
-    """Return every fact table reachable beneath ``element``, subqueries included.
-
-    Deliberately does **not** prune the rewriter's own subqueries the way
-    :func:`backend.db._guard.collect_references` does: the question here is
-    which fact tables a masked scope actually covers, and every one of them
-    sits inside exactly such a subquery.
-    """
-    found: set[str] = set()
-    stack: list[ClauseElement] = [element]
-    seen: set[int] = set()
-    while stack:
-        current = stack.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, TableClause):
-            if current.name in table_names:
-                found.add(current.name)
-            continue
-        if isinstance(current, ColumnClause) and current.table is not None:
-            stack.append(current.table)
-        stack.extend(current.get_children())
-    return frozenset(found)
-
-
 def _assert_retraction_mask(statement: Select[Any], touched_tables: frozenset[str]) -> None:
-    """Fail closed unless every touched fact table sits under a retraction mask.
+    """Fail closed unless **every** path to a fact table passes under a mask.
 
     The post-rewrite invariant for P2.10, checked on the statement itself
-    before it goes back to the ORM. For each ``Select`` in the rewritten tree
-    whose own WHERE carries ``NOT is_retraction``, the fact tables beneath it
-    are collected; the union must be exactly ``touched_tables``.
+    before it goes back to the ORM. The tree is walked carrying a "currently
+    inside a scope that filters ``NOT is_retraction``" flag, which turns on
+    when a ``Select`` whose own WHERE carries the mask is entered; a fact
+    table reached with the flag still off is a violation.
 
-    A missing table means some path to it can return retraction rows — rows
-    whose payload columns are all NULL by constraint — so the caller would
+    Per *reference*, not per table, because one masked reference does not
+    redeem an unmasked one: a statement joining the versioned form of
+    ``price_bar`` to the raw table would satisfy a per-table check and still
+    return retractions. Nodes are memoized on (node, flag) rather than on
+    node, so a subtree reachable both ways is judged both ways.
+
+    An unmasked reference means the statement can return retraction rows —
+    rows whose payload columns are all NULL by constraint — so a caller would
     receive a hollow object shaped like an observation. Raises
     :class:`RetractionMaskError`. Like :func:`_assert_single_as_of_bind` this
     re-derives the property from the finished statement rather than trusting
     that :func:`_versioned_entity` put the predicate there.
     """
-    masked: set[str] = set()
-    stack: list[ClauseElement] = [statement]
-    seen: set[int] = set()
+    unmasked: set[str] = set()
+    stack: list[tuple[ClauseElement, bool]] = [(statement, False)]
+    seen: set[tuple[int, bool]] = set()
     while stack:
-        element = stack.pop()
-        if id(element) in seen:
+        element, masked = stack.pop()
+        marker = (id(element), masked)
+        if marker in seen:
             continue
-        seen.add(id(element))
+        seen.add(marker)
         if isinstance(element, Select) and _masks_retractions(element):
-            masked |= _fact_tables_within(element, touched_tables)
-        stack.extend(element.get_children())
-    unmasked = sorted(touched_tables - masked)
+            masked = True
+        if isinstance(element, TableClause):
+            if element.name in touched_tables and not masked:
+                unmasked.add(element.name)
+            continue
+        if isinstance(element, ColumnClause) and element.table is not None:
+            stack.append((element.table, masked))
+        stack.extend((child, masked) for child in element.get_children())
     if unmasked:
         msg = (
-            f"as-of rewrite left bitemporal table(s) {', '.join(unmasked)} reachable "
+            f"as-of rewrite left bitemporal table(s) {', '.join(sorted(unmasked))} reachable "
             "without a NOT is_retraction mask; a retraction carries no payload (P2.10), "
             "so such a row would reach the caller as an observation with NULL values. "
             "Refusing to execute (fail-closed per I1/I3)"

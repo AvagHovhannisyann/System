@@ -253,9 +253,7 @@ def retract_fact[RowT: BitemporalMixin](
         FutureKnowledgeTimeError: if ``knowledge_time`` is in the future.
     """
     _require_aware(knowledge_time, "knowledge_time")
-    validate_knowledge_time(
-        knowledge_time, context=f"retract_fact({type(row).__name__})", now=now
-    )
+    validate_knowledge_time(knowledge_time, context=f"retract_fact({type(row).__name__})", now=now)
     if row.is_retraction:
         msg = (
             f"{type(row).__name__} version is already a retraction (knowledge_time "

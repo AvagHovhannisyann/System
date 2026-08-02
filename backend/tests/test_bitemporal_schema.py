@@ -207,9 +207,7 @@ def test_observation_payload_present_check_preserves_the_old_not_null(
     """
     table = _table(model)
     constraint = _check_constraint(table, OBSERVATION_PAYLOAD_PRESENT)
-    clauses = " AND ".join(
-        f"{name} IS NOT NULL" for name in model.__bitemporal_required_payload__
-    )
+    clauses = " AND ".join(f"{name} IS NOT NULL" for name in model.__bitemporal_required_payload__)
     assert str(constraint.sqltext) == f"is_retraction OR ({clauses})"
 
 

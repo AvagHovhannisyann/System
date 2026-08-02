@@ -359,12 +359,19 @@ class BitemporalMixin:
         return value
 
     def __init_subclass__(cls, **kwargs: object) -> None:
-        """Validate ``__bitemporal_key__`` and register the subclass.
+        """Validate ``__bitemporal_key__``, derive the payload contract, register.
 
         Raises ``TypeError`` — before the declarative machinery maps the
         class, so a rejected model leaves no trace in the metadata — when
         the key is missing, empty, or names an attribute the class does not
         define.
+
+        The ``super()`` call is what maps the class, so ``cls.__table__``
+        exists from the next line on; :func:`_apply_payload_contract` runs
+        there to derive the payload columns and attach the P2.10 constraints
+        (module docstring). Doing it here rather than from a mapper event
+        keeps it eager: a fact table is fully constrained the moment its class
+        statement finishes, with no configure-time ordering to reason about.
         """
         key = getattr(cls, "__bitemporal_key__", None)
         if not key or not isinstance(key, tuple):
@@ -431,9 +438,11 @@ def _apply_payload_contract(cls: type[BitemporalMixin]) -> None:
     constrain and gets neither constraint; both would be tautologies. Raises
     ``TypeError`` if the class has no ``__table__`` (single-table inheritance
     or a hand-supplied ``__table__`` — shapes the D-011 physical layout does
-    not contemplate, refused loudly rather than silently left unconstrained).
+    not contemplate, refused loudly rather than silently left unconstrained;
+    the lookup is on ``cls.__dict__`` precisely so an *inherited* table is not
+    mistaken for the subclass's own and constrained a second time).
     """
-    table = cast(Table | None, getattr(cls, "__table__", None))
+    table = cast(Table | None, cls.__dict__.get("__table__"))
     if table is None:
         msg = (
             f"{cls.__name__} carries BitemporalMixin but has no __table__ of its own; "

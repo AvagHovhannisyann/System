@@ -409,9 +409,7 @@ async def test_moving_the_compute_date_forward_moves_the_window() -> None:
     store = baseline_store()
     at_date = await compute(AMIHUD_ILLIQUIDITY, amihud_illiquidity, store)
     earlier_day = business_days_ending(LAST_TRADING_DAY, 6)[0]
-    earlier = await compute(
-        AMIHUD_ILLIQUIDITY, amihud_illiquidity, store, compute_date=earlier_day
-    )
+    earlier = await compute(AMIHUD_ILLIQUIDITY, amihud_illiquidity, store, compute_date=earlier_day)
     assert not math.isnan(at_date[0])
     assert not math.isnan(earlier[0])
     assert at_date[0] != earlier[0]
@@ -482,9 +480,7 @@ async def test_the_same_bar_stamped_honestly_is_simply_invisible() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("spec", "computation", "expected"), BLOCKED_FACTORS, ids=BLOCKED_IDS
-)
+@pytest.mark.parametrize(("spec", "computation", "expected"), BLOCKED_FACTORS, ids=BLOCKED_IDS)
 async def test_no_late_arriving_data_can_turn_a_blocked_refusal_into_a_number(
     spec: FeatureSpec, computation: FeatureComputation, expected: type[Exception]
 ) -> None:
@@ -515,9 +511,7 @@ async def test_no_late_arriving_data_can_turn_a_blocked_refusal_into_a_number(
         assert getattr(raised.value, "feature", None) == spec.name
 
 
-@pytest.mark.parametrize(
-    ("spec", "computation", "expected"), BLOCKED_FACTORS, ids=BLOCKED_IDS
-)
+@pytest.mark.parametrize(("spec", "computation", "expected"), BLOCKED_FACTORS, ids=BLOCKED_IDS)
 async def test_a_blocked_factor_refuses_before_touching_the_session_it_was_given(
     spec: FeatureSpec, computation: FeatureComputation, expected: type[Exception]
 ) -> None:
