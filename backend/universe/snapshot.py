@@ -70,6 +70,7 @@ __all__ = [
     "load_snapshots",
     "persist_snapshot",
     "snapshot_from_rows",
+    "snapshots_by_date",
 ]
 
 

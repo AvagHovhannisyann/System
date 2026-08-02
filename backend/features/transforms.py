@@ -48,12 +48,32 @@ Units
   means the raw feature's units. Neither function rescales, so the residual of
   a unit-variance input has variance *below* one, by exactly the fraction of
   cross-sectional variance the sectors or the market explained.
-- :func:`transform_cross_section` therefore returns a **dimensionless** array
-  whose cross-sectional standard deviation is at most 1 and generally less. It
-  is deliberately not re-standardized at the end: the shrinkage *is* the
+- :func:`transform_cross_section` therefore returns a **dimensionless** array,
+  and it is deliberately not re-standardized at the end: the shrinkage *is* the
   information about how much of the factor was a sector or market bet, and
   re-scaling it to unit variance would erase that and re-inflate the residual
   noise of the names in small sectors.
+
+  The shrinkage claim that always holds is the projection inequality, stated
+  **per step, over the names that step retains**: :func:`neutralize` and
+  :func:`beta_neutralize` are orthogonal projections, so neither increases the
+  sum of squares of the entries it returns, measured against its own input on
+  those same entries.
+
+  Two convenient stronger readings are false, and both are pinned as false in
+  the tests rather than left to be rediscovered:
+
+  1. *"The output's standard deviation is at most 1."* True only when **no**
+     name is dropped. Z-scoring gives the *whole* cross-section unit
+     dispersion; once a singleton sector or a missing beta removes some names,
+     the survivors' z-scores need not have unit dispersion among themselves.
+     ``[1.0, 30.0, 2.0]`` in sectors ``[0, 0, 1]`` comes out with a standard
+     deviation of about 1.25, because the name that carried the dispersion is
+     the one that left (``test_transforms.py::TestUnits``).
+  2. *"The inequality chains end to end."* It does not. A later step can drop
+     the very name that absorbed an earlier step's energy, leaving the
+     survivors holding more than their own z-scores had
+     (``test_transforms_properties.py::TestNeutralizationGeometry``).
 
 --------------------------------------------------------------------------
 The cross-sectional contract: no cross-date leakage
@@ -93,7 +113,10 @@ indistinguishable from a measurement, and "this stock's book-to-price is exactly
 average" is a claim no one made.
 
 ``+inf`` and ``-inf`` are refused with :class:`ValueError` rather than clipped;
-:func:`backend.features._stats.reject_infinities` explains why.
+:func:`backend.features._stats.reject_infinities` explains why. They are also
+never *produced*: where ``float64`` arithmetic on a finite cross-section
+overflows, the affected entries are ``NaN``. See
+:func:`backend.features._stats.statistics_are_representable`.
 
 --------------------------------------------------------------------------
 Degenerate cross-sections
@@ -116,6 +139,8 @@ Zero cross-sectional dispersion         All ``NaN`` (never ``inf``)
 Sector with < 2 present members         ``NaN`` for that sector's members
 Fewer than 3 observations, beta         All ``NaN``
 Zero dispersion in ``betas``            All ``NaN``
+A statistic overflows ``float64``       All ``NaN`` (never ``inf``, never 0)
+A residual overflows ``float64``        ``NaN`` for that entry
 Mismatched lengths, 2-D input, ``inf``  :class:`ValueError`
 Percentile outside ``[0, 100]``         :class:`ValueError`
 ======================================  ===================================
@@ -142,8 +167,19 @@ Applied to its own output:
   :func:`backend.features._stats.order_statistic_bounds`.
 - :func:`cross_sectional_zscore` is **idempotent up to floating point**. The
   output has mean 0 and sample standard deviation 1 in exact arithmetic, so the
-  second pass subtracts ~0 and divides by ~1; the residual difference is
-  rounding, of order ``eps`` relative to the values.
+  second pass subtracts ~0 and divides by ~1.
+
+  How large "up to floating point" is depends on the input, and the honest
+  bound is ``eps * kappa`` where ``kappa = max|x| / sigma`` is the
+  cross-section's conditioning — *not* ``eps`` outright. Subtracting a mean
+  that is large relative to the spread cancels leading digits, so the first
+  pass's own mean and standard deviation are only accurate to ``eps * kappa``
+  and the second pass corrects by that much. For a feature that has already
+  been centred this is ~``1e-15``; at ``kappa = 1e10`` — still admissible,
+  since :data:`ZERO_DISPERSION_RELATIVE_TOLERANCE` only refuses ``kappa`` above
+  ``1e12`` — the difference reaches ~``1e-6``. Ranks are unaffected either way.
+  ``test_transforms.py::TestIdempotence`` measures the dependence rather than
+  asserting a single tolerance and hoping.
 - :func:`neutralize` is **idempotent up to floating point**. Within-group
   demeaning is an orthogonal projection, and groups that lost their only member
   to ``NaN`` stay ``NaN`` — a fixed point — so the second pass has the same
@@ -187,11 +223,13 @@ from backend.features._stats import (
     as_float_1d,
     as_group_1d,
     dispersion_is_degenerate,
+    nan_where_overflowed,
     observed_mask,
     order_statistic_bounds,
     reject_infinities,
     require_matching_length,
     require_percentile_pair,
+    statistics_are_representable,
 )
 
 if TYPE_CHECKING:
@@ -332,7 +370,12 @@ def cross_sectional_zscore(values: npt.NDArray[np.float64]) -> npt.NDArray[np.fl
         standard deviation would return ``inf`` or amplify rounding noise into
         full-scale scores. Zero is deliberately *not* returned in that case —
         "every name is exactly average" would be a fabricated measurement, where
-        ``NaN`` correctly says the feature is unavailable that day.
+        ``NaN`` correctly says the feature is unavailable that day. The same
+        ``NaN`` is returned at the other end of the range, when the mean or the
+        standard deviation overflows ``float64`` (see
+        :func:`backend.features._stats.statistics_are_representable`): dividing
+        by an infinite standard deviation would return exactly that fabricated
+        zero, and it would look like a perfectly ordinary standardized feature.
 
     Raises:
         ValueError: if ``values`` is not a one-dimensional numeric array or
@@ -352,13 +395,18 @@ def cross_sectional_zscore(values: npt.NDArray[np.float64]) -> npt.NDArray[np.fl
         return np.full(array.shape, np.nan, dtype=np.float64)
 
     mean = float(np.mean(observed))
-    standard_deviation = float(np.std(observed, ddof=1))
+    standard_deviation = float(np.std(observed, ddof=0))
     scale = float(np.max(np.abs(observed)))
+    if not statistics_are_representable(mean, standard_deviation, scale):
+        return np.full(array.shape, np.nan, dtype=np.float64)
     if dispersion_is_degenerate(
         standard_deviation, scale=scale, relative_tolerance=ZERO_DISPERSION_RELATIVE_TOLERANCE
     ):
         return np.full(array.shape, np.nan, dtype=np.float64)
 
+    # No overflow guard is needed on the quotient: with ddof=1 the sample
+    # standard deviation satisfies std >= max|x - mean| / sqrt(n - 1), so every
+    # z-score is bounded by sqrt(n - 1) once `standard_deviation` is finite.
     return np.asarray((array - mean) / standard_deviation, dtype=np.float64)
 
 
@@ -374,10 +422,13 @@ def neutralize(
     can see another date.
 
     The result has a cross-sectional mean of zero within every usable group, so
-    a portfolio built from it takes no deliberate sector position. Its
-    cross-sectional standard deviation is *below* that of the input by the
-    fraction of variance the sectors explained — that shrinkage is the sector
-    bet being removed, and it is not scaled back out.
+    a portfolio built from it takes no deliberate sector position. Over the
+    names that survive, the residual's sum of squares is *below* the input's by
+    the amount the sector means explained — that shrinkage is the sector bet
+    being removed, and it is not scaled back out. Compared against the *whole*
+    input, including names dropped for being alone in their sector, the residual
+    dispersion can be larger; the projection inequality holds on the retained
+    set, not across a changed one.
 
     Idempotent up to floating point.
 
@@ -397,7 +448,9 @@ def neutralize(
         member of a group with fewer than
         :data:`MINIMUM_GROUP_MEMBERS_FOR_NEUTRALIZATION` present values — a
         lone member is exactly its own group mean, so its residual would be zero
-        by construction rather than by measurement.
+        by construction rather than by measurement. ``NaN`` also where the
+        group's total or the residual itself overflows ``float64``; an infinity
+        is never returned.
 
     Raises:
         ValueError: if the two arrays differ in length, if either is not
@@ -430,10 +483,16 @@ def neutralize(
     usable = counts >= MINIMUM_GROUP_MEMBERS_FOR_NEUTRALIZATION
     means = np.full(n_groups, np.nan, dtype=np.float64)
     means[usable] = totals[usable] / counts[usable]
+    # A group whose present values sum past the float64 range has no
+    # representable mean. That is a condition of the data on this date, so its
+    # members are NaN — not `inf`, which is not a measurement of anything.
+    means[np.isinf(means)] = np.nan
 
     # NaN in `means` propagates to every member of an unusable group; NaN in
-    # `array` propagates for every absent value. Neither is filled.
-    return np.asarray(array - means[codes], dtype=np.float64)
+    # `array` propagates for every absent value. Neither is filled. The residual
+    # itself can still overflow — a value and a group mean near opposite ends of
+    # the range differ by more than float64 can hold — and that entry is NaN too.
+    return nan_where_overflowed(np.asarray(array - means[codes], dtype=np.float64))
 
 
 def beta_neutralize(
@@ -472,7 +531,9 @@ def beta_neutralize(
         :data:`ZERO_DISPERSION_RELATIVE_TOLERANCE`): the design matrix
         ``[1, beta]`` is then rank deficient, the slope is not identified, and
         "beta neutral" is not a claim that can be made from a cross-section in
-        which every name has the same beta.
+        which every name has the same beta. The same ``NaN`` is returned when
+        any of the fit's statistics overflows ``float64``, and per entry where
+        a residual does; an infinity is never returned.
 
     Raises:
         ValueError: if the two arrays differ in length, if either is not a
@@ -503,18 +564,26 @@ def beta_neutralize(
     centered_betas = fitted_betas - beta_mean
     beta_dispersion = float(np.std(fitted_betas, ddof=1))
     beta_scale = float(np.max(np.abs(fitted_betas)))
+    if not statistics_are_representable(beta_mean, beta_dispersion, beta_scale):
+        return np.full(array.shape, np.nan, dtype=np.float64)
     if dispersion_is_degenerate(
         beta_dispersion, scale=beta_scale, relative_tolerance=ZERO_DISPERSION_RELATIVE_TOLERANCE
     ):
         return np.full(array.shape, np.nan, dtype=np.float64)
 
     value_mean = float(np.mean(fitted_values))
-    slope = float(
-        np.dot(centered_betas, fitted_values - value_mean) / np.dot(centered_betas, centered_betas)
-    )
+    numerator = float(np.dot(centered_betas, fitted_values - value_mean))
+    denominator = float(np.dot(centered_betas, centered_betas))
+    # `denominator` is (n - 1) times the variance of the fitted betas, which the
+    # dispersion check has already found non-degenerate — but a spread small
+    # enough to square to zero underflows it anyway, and dividing by that would
+    # manufacture an infinite slope from finite data.
+    if not statistics_are_representable(value_mean, numerator, denominator) or denominator <= 0.0:
+        return np.full(array.shape, np.nan, dtype=np.float64)
+    slope = numerator / denominator
 
     result = np.full(array.shape, np.nan, dtype=np.float64)
-    result[present] = fitted_values - value_mean - slope * centered_betas
+    result[present] = nan_where_overflowed(fitted_values - value_mean - slope * centered_betas)
     return result
 
 
@@ -555,12 +624,14 @@ def transform_cross_section(
     Returns:
         A new **dimensionless** array in the caller's element order: the feature
         in cross-sectional standard-deviation units, with sector — and
-        optionally market — exposure removed. Its cross-sectional standard
-        deviation is at most 1 and generally below it; the output is not
-        re-standardized, because that shrinkage measures how much of the factor
-        was a sector or market bet. ``NaN`` wherever the value was absent or a
-        step could not be computed (see the degenerate-cross-section table in
-        the module docstring); ``NaN`` propagates, never filled.
+        optionally market — exposure removed. The output is not re-standardized,
+        because the shrinkage measures how much of the factor was a sector or
+        market bet. Its cross-sectional standard deviation is at most 1 when
+        every name survives every step, and can exceed 1 when some do not; the
+        module docstring's *Units* section gives the inequality that always
+        holds. ``NaN`` wherever the value was absent or a step could not be
+        computed (see the degenerate-cross-section table in the module
+        docstring); ``NaN`` propagates, never filled.
 
     Raises:
         ValueError: if the arrays differ in length, are not one-dimensional

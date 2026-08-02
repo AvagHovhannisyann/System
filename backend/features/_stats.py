@@ -29,6 +29,16 @@ neighbouring date's value. Under directive invariant I3 a filled ``NaN`` is
 fabricated data entering the feature matrix, indistinguishable downstream from
 a measurement.
 
+There is a third thing that is neither: an **infinity**. It is refused on input
+(:func:`reject_infinities`) and it is never produced on output. Every finite
+cross-section has a magnitude at which ``float64`` arithmetic overflows — a
+sum of values near ``1e308``, a sum of squares of values above ``1e154`` — and
+an overflow is a fact about the arithmetic, not about the securities. Where one
+occurs the affected entries are ``NaN``: not available, which is true, rather
+than ``inf``, which is not a number a downstream model can consume, or ``0.0``,
+which is a fabricated measurement. :func:`statistics_are_representable` guards
+the statistics and :func:`nan_where_overflowed` guards the results.
+
 --------------------------------------------------------------------------
 Units
 --------------------------------------------------------------------------
@@ -53,6 +63,7 @@ that makes cross-date leakage structurally impossible in
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -67,11 +78,13 @@ __all__ = [
     "as_float_1d",
     "as_group_1d",
     "dispersion_is_degenerate",
+    "nan_where_overflowed",
     "observed_mask",
     "order_statistic_bounds",
     "reject_infinities",
     "require_matching_length",
     "require_percentile_pair",
+    "statistics_are_representable",
 ]
 
 type FloatArray = npt.NDArray[np.float64]
@@ -349,3 +362,61 @@ def dispersion_is_degenerate(
         case the caller must return ``NaN`` rather than divide.
     """
     return bool(standard_deviation <= relative_tolerance * scale)
+
+
+def statistics_are_representable(*statistics: float) -> bool:
+    """Whether every summary statistic came back as a finite ``float64``.
+
+    :func:`dispersion_is_degenerate` guards the *bottom* of the range — a
+    standard deviation too small to divide by. This guards the *top*. A
+    cross-section may consist entirely of finite, admissible values and still
+    overflow the arithmetic that summarizes it: a sum of values near ``1e308``
+    overflows to ``inf``, and ``numpy``'s variance takes a mean of *squared*
+    deviations, so any cross-section whose spread exceeds roughly ``1.3e154``
+    overflows too.
+
+    Neither outcome may be used. An infinite mean turns every residual into
+    ``-inf``; an infinite standard deviation turns every z-score into exactly
+    ``0.0``, which reads downstream as "every name is precisely average" — a
+    fabricated measurement of the worst kind, because it is finite, plausible
+    and silent. The transform must instead report the date as unavailable.
+
+    Args:
+        *statistics: summary statistics just computed from a cross-section, in
+            the cross-section's own units (a mean, a standard deviation, a
+            regression slope, a magnitude). ``NaN`` counts as unrepresentable:
+            it can only arrive here as ``inf - inf`` from a partial sum that
+            overflowed in both directions.
+
+    Returns:
+        ``True`` when every statistic is finite and may be divided by,
+        subtracted or multiplied; ``False`` when the caller must return ``NaN``.
+    """
+    return all(math.isfinite(statistic) for statistic in statistics)
+
+
+def nan_where_overflowed(values: FloatArray) -> FloatArray:
+    """Replace any infinity the arithmetic produced with ``NaN``.
+
+    Every transform in this package rejects infinite *inputs*
+    (:func:`reject_infinities`), so an infinity in a *result* can only be a
+    ``float64`` overflow — most reachably a residual ``x - group_mean`` whose
+    two finite terms are near opposite ends of the range and whose difference
+    is not representable. That is a fact about the arithmetic on one date, so
+    it is a data condition: the affected entries become ``NaN``, "not
+    available", rather than travelling on as ``inf``.
+
+    Emitting the ``inf`` instead would be worse than useless. Downstream it
+    would be refused by the very next transform's :func:`reject_infinities`,
+    turning a data condition into a :class:`ValueError` that blames a caller
+    who passed nothing infinite.
+
+    Args:
+        values: a freshly computed result array, in the caller's units.
+            Existing ``NaN`` entries are left as they are.
+
+    Returns:
+        A new array, identical except that ``+inf`` and ``-inf`` have become
+        ``NaN``.
+    """
+    return np.asarray(np.where(np.isinf(values), np.nan, values), dtype=np.float64)
