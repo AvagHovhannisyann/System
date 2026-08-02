@@ -63,7 +63,7 @@ import sqlalchemy as sa
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from backend.db import ingest_writer_session
-from backend.execution.errors import ConcurrentTransitionError
+from backend.execution.errors import ConcurrentTransitionError, IllegalTransitionError
 from backend.execution.idempotency import idempotency_key, idempotency_preimage
 from backend.execution.lifecycle import INITIAL_STATE, OrderEvent, OrderState
 from backend.execution.orders import (
@@ -355,19 +355,35 @@ async def test_concurrent_distinct_submissions_all_land() -> None:
 
 
 async def test_concurrent_appends_of_one_event_leave_one_transition() -> None:
-    """Six writers claim sequence 1; one lands and five are told to re-read.
+    """Six writers claim sequence 1; one lands and five are refused, three ways.
 
-    The losers are refused by **either** of two mechanisms depending on where
-    they are when the winner commits — the primary key if their ``INSERT``
-    reached the index first, the chain guard if their statement started
-    afterwards and its fresh ``READ COMMITTED`` snapshot already showed the
-    winner's row. Both carry SQLSTATE ``23505`` (migration 0014 gives the trigger
-    branch that code deliberately), so both become the same retryable error and
-    the test does not have to know which one fired.
+    There are **three** legitimate refusals here, not two, and the third only
+    became visible once CI ran this against a real database:
 
-    The first version of this test asserted the same counts and passed against a
-    double that modelled only the index. It failed the moment CI ran it: five
-    writers were refused, none of them as ``ConcurrentTransitionError``.
+    1. ``ConcurrentTransitionError`` from the **primary key** — the loser's
+       ``INSERT`` reached the index first and blocked until the winner committed.
+    2. ``ConcurrentTransitionError`` from the **chain guard** — the loser's
+       statement started afterwards, so its fresh ``READ COMMITTED`` snapshot
+       already showed the winner's row. Migration 0014 gives that branch SQLSTATE
+       ``23505`` deliberately, so both database routes become one retryable error
+       and the caller never has to know which fired.
+    3. ``IllegalTransitionError`` from the **state machine, in Python, before any
+       insert is attempted** — the loser's ``load_order`` ran after the winner
+       committed, so the order already read ``PENDING_NEW`` and ``release`` is no
+       longer a legal event from there.
+
+    The third is not a lesser outcome. It is the *same* refusal arriving earlier
+    and cheaper, and it is exactly what ``ConcurrentTransitionError``'s own
+    message tells a caller to expect: re-read the history, because the event may
+    no longer be legal from the state that now holds. A retrying caller reaches
+    it on the next attempt regardless.
+
+    This test's history is the argument for the accounting assertion below. Its
+    first version counted only ``ConcurrentTransitionError`` and passed against a
+    double that modelled only the index; CI showed five refusals, none of that
+    type. Its second version fixed the type and added the total, and CI showed
+    ``1 + 3 == 6`` — two writers refused by a path nobody had named. Both times
+    the invariant that actually matters held: exactly one transition on disk.
     """
     security_id = await create_security()
     order_id = await seed_order(security_id)
@@ -376,13 +392,23 @@ async def test_concurrent_appends_of_one_event_leave_one_transition() -> None:
         *(append_and_commit(order_id, OrderEvent.RELEASE, gate) for _ in range(CONCURRENT_WRITERS)),
         return_exceptions=True,
     )
-    refused = [item for item in outcomes if isinstance(item, ConcurrentTransitionError)]
     written = [item for item in outcomes if not isinstance(item, BaseException)]
-    # Named explicitly so a stray exception type cannot hide inside "not
-    # written": every outcome must be one of the two the design allows.
+    lost_at_the_database = [
+        item for item in outcomes if isinstance(item, ConcurrentTransitionError)
+    ]
+    lost_in_the_machine = [item for item in outcomes if isinstance(item, IllegalTransitionError)]
+    refused = lost_at_the_database + lost_in_the_machine
+    # Every outcome must be one of the three named above. Kept as a total rather
+    # than a per-type count because which mechanism catches a given writer is a
+    # scheduling accident, while "nothing was refused by a path we have not
+    # thought about" is the property. A stray exception type cannot hide inside
+    # "not written".
     assert len(written) + len(refused) == CONCURRENT_WRITERS, outcomes
     assert len(written) == 1
     assert len(refused) == CONCURRENT_WRITERS - 1
+    # At least one loser must reach the database, or this test has stopped
+    # exercising the constraint it exists for and become a state-machine test.
+    assert lost_at_the_database, outcomes
     async with ingest_writer_session() as session:
         loaded = await load_order(session, order_id)
     assert loaded.sequence_number == 1
