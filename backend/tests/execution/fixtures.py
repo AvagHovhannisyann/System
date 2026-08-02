@@ -10,9 +10,30 @@ the event loop, so concurrent callers genuinely interleave up to the boundary.
 What it does and does not prove is worth being exact about. It proves the control
 flow in ``record_order`` and ``append_transition`` is correct when N coroutines
 race: one winner, N-1 absorbed or refused, one order. It does **not** prove that
-Postgres enforces the constraint — that is
-``backend/tests/integration/test_order_lifecycle.py``, which cannot run while
-Docker is down.
+Postgres enforces anything — that is
+``backend/tests/integration/test_order_lifecycle.py``.
+
+Where this double was wrong, and what it cost
+---------------------------------------------
+
+The first version modelled a concurrent transition append as *the primary key*
+refusing the loser, raising a bare ``IntegrityError`` whose ``orig`` carried no
+SQLSTATE. Both halves were wrong, and the suite was green anyway until CI ran the
+integration tests against a real daemon:
+
+- **The trigger fires before the index.** ``execution_order_transition`` has a
+  ``BEFORE INSERT`` chain guard, and a ``BEFORE`` row trigger runs ahead of every
+  constraint. A writer whose ``INSERT`` starts after the winner committed is
+  refused by the *trigger* — under ``READ COMMITTED`` its statement sees a tail
+  its own earlier ``SELECT`` did not — and never reaches the index at all. That
+  is the likelier path under contention, and the double had no model of it.
+- **Refusals carry a code.** The store decides retryable-versus-malformed on
+  SQLSTATE, so a double whose errors carry none cannot distinguish a correct
+  store from one that translates every failure into a retry.
+
+The double now refuses in the database's order, with the database's codes. The
+lesson is narrower than "doubles lie": a double that models a *constraint* while
+the schema also has a *trigger* is modelling the wrong layer.
 """
 
 from __future__ import annotations
@@ -24,7 +45,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self, cast
 
 import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.sql import Insert, Select
 
 from backend.execution.orders import (
@@ -33,6 +54,7 @@ from backend.execution.orders import (
     Side,
     TimeInForce,
 )
+from backend.execution.store import UNIQUE_VIOLATION_SQLSTATE
 from backend.tracking.stamp import ReproducibilityStamp
 
 if TYPE_CHECKING:
@@ -44,6 +66,32 @@ CONFIG_HASH_A = "1" * 64
 CONFIG_HASH_B = "2" * 64
 
 PAPER_VENUE = "paper"
+
+RAISE_EXCEPTION_SQLSTATE = "P0001"
+"""SQLSTATE of a plpgsql ``RAISE EXCEPTION`` that names no code of its own.
+
+The chain guard's non-retryable refusals — a gap, a chain that does not connect,
+an overfill — arrive under this code. The store must **not** translate them into
+``ConcurrentTransitionError``: retrying a malformed row forever is worse than
+failing once.
+"""
+
+
+class DriverError(Exception):
+    """Stand-in for the driver exception SQLAlchemy wraps in a ``DBAPIError``.
+
+    Carries a ``sqlstate`` attribute, which is what asyncpg exposes and what
+    :func:`backend.execution.store._is_position_taken` reads. The double raised a
+    plain ``Exception`` before, so every error it produced looked
+    indistinguishable to code that inspects the SQLSTATE — which is precisely
+    the distinction the store now depends on.
+    """
+
+    def __init__(self, sqlstate: str, message: str) -> None:
+        """Build the error from a SQLSTATE and the message the server would send."""
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
 
 MOMENT = dt.datetime(2026, 8, 3, 14, 30, tzinfo=dt.UTC)
 """A fixed, timezone-aware instant for ``occurred_at`` in tests."""
@@ -143,16 +191,21 @@ class _Savepoint:
 class PaperOrderStoreDouble:
     """In-memory stand-in for ``execution_order`` and ``execution_order_transition``.
 
-    Enforces the two constraints the store depends on, and only those:
+    Enforces the constraints the store depends on, and only those:
 
     - ``UNIQUE (idempotency_key)`` on orders;
-    - ``PRIMARY KEY (order_id, sequence_number)`` on transitions.
+    - the per-order sequence on transitions, refused the way the *database*
+      refuses it — see :meth:`_insert_transition`.
 
-    Both are enforced *atomically* — the check and the write happen with no
-    ``await`` between them, exactly as a unique index behaves — while
+    All of them are enforced *atomically* — the check and the write happen with
+    no ``await`` between them, exactly as a unique index behaves — while
     :meth:`execute` yields to the event loop on entry, so concurrent callers
-    interleave freely up to the atomic boundary. A violation raises the same
-    :class:`sqlalchemy.exc.IntegrityError` a driver would.
+    interleave freely up to the atomic boundary.
+
+    Every refusal carries a :class:`DriverError` with a real SQLSTATE, because
+    the store distinguishes retryable refusals from malformed ones on that code.
+    A double whose errors carry no code cannot tell the store apart from a
+    version of the store that translates everything.
 
     ``venue`` is defaulted here rather than accepted, mirroring the server
     default: the store never supplies it, and the double would have nowhere to
@@ -228,7 +281,11 @@ class PaperOrderStoreDouble:
             raise IntegrityError(
                 "INSERT INTO execution_order",
                 values,
-                Exception("duplicate key value violates unique constraint "),
+                DriverError(
+                    UNIQUE_VIOLATION_SQLSTATE,
+                    "duplicate key value violates unique constraint "
+                    '"uq_execution_order_idempotency_key"',
+                ),
             )
         order_id = self._next_order_id
         self._next_order_id += 1
@@ -240,16 +297,44 @@ class PaperOrderStoreDouble:
         return _Result([(order_id,)])
 
     def _insert_transition(self, values: dict[str, object]) -> _Result:
-        """Insert one transition; the sequence-number check and write are one step."""
+        """Insert one transition, modelling both refusals the database can give.
+
+        **The chain guard first, the index second — that is the order Postgres
+        uses and the order this double got wrong before CI ran it.** A
+        ``BEFORE INSERT`` trigger fires ahead of every constraint, so a writer
+        whose statement starts after the winner committed is refused by the
+        *trigger* (``23505`` by migration 0014's ``USING ERRCODE``), never by the
+        index. Modelling only the index made the double raise a bare
+        ``IntegrityError`` with no SQLSTATE and hid the whole path.
+
+        A sequence number at or below the tail is "position taken" (``23505``,
+        retryable). A gap above it is a malformed chain (``P0001``, not
+        retryable), and the store must be seen to keep them apart.
+        """
         self.transition_insert_attempts += 1
         order_id = int(cast("int", values["order_id"]))
         sequence_number = int(cast("int", values["sequence_number"]))
         history = self.transitions.setdefault(order_id, [])
-        if any(int(cast("int", row["sequence_number"])) == sequence_number for row in history):
+        tail = max((int(cast("int", row["sequence_number"])) for row in history), default=0)
+        if sequence_number <= tail:
             raise IntegrityError(
                 "INSERT INTO execution_order_transition",
                 values,
-                Exception("duplicate key value violates unique constraint "),
+                DriverError(
+                    UNIQUE_VIOLATION_SQLSTATE,
+                    f"order {order_id} is already at sequence {tail}, so position "
+                    f"{sequence_number} is taken",
+                ),
+            )
+        if sequence_number != tail + 1:
+            raise DBAPIError(
+                "INSERT INTO execution_order_transition",
+                values,
+                DriverError(
+                    RAISE_EXCEPTION_SQLSTATE,
+                    f"order {order_id} is at sequence {tail}, so the next transition is "
+                    f"{tail + 1}, not {sequence_number}",
+                ),
             )
         history.append(dict(values))
         return _Result([])

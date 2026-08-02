@@ -54,10 +54,10 @@ prepared to retry the transaction as a whole.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from backend.db.models import ExecutionOrder as ExecutionOrderRow
 from backend.db.models import ExecutionOrderTransition as ExecutionOrderTransitionRow
@@ -102,6 +102,28 @@ __all__ = [
     "load_order_by_key",
     "record_order",
 ]
+
+UNIQUE_VIOLATION_SQLSTATE: Final = "23505"
+"""SQLSTATE ``unique_violation`` — the code both sequence-conflict paths carry.
+
+A concurrent append is refused by the database in one of **two** ways, depending
+on where the loser is when the winner commits, and this module has to translate
+both into the same retryable :class:`~backend.execution.errors.ConcurrentTransitionError`:
+
+1. **The primary key.** The loser's ``INSERT`` reaches the index while the
+   winner's row is still uncommitted, blocks on it, and fails when the winner
+   commits. Postgres raises ``unique_violation`` natively.
+2. **The chain-guard trigger.** The loser's ``INSERT`` starts *after* the winner
+   committed. Under ``READ COMMITTED`` each statement takes a fresh snapshot, so
+   the ``BEFORE INSERT`` trigger sees the winner's row even though the loser's
+   earlier ``SELECT`` did not — and refuses the row before the index is ever
+   consulted. Migration 0014 raises that specific case ``USING ERRCODE =
+   'unique_violation'`` so it arrives here as the same SQLSTATE rather than as a
+   generic ``P0001`` the caller would have to match on message text.
+
+Path 2 is the likelier one under real contention, and it is the one an in-memory
+double that models only the index will miss entirely.
+"""
 
 DuplicatePolicy = Literal["absorb", "refuse"]
 """What :func:`record_order` does when the key is already present.
@@ -176,6 +198,56 @@ def _require_paper(order_id: int, stored_venue: str) -> None:
     """
     if stored_venue != ExecutionVenue.PAPER.value:
         raise NotPaperOrderError(order_id=order_id, stored_venue=stored_venue)
+
+
+def _sqlstate(exc: DBAPIError) -> str | None:
+    """Return the five-character SQLSTATE a driver exception carries, if any.
+
+    SQLAlchemy exposes no portable accessor, so the driver's own attribute is
+    read: asyncpg names it ``sqlstate``, psycopg names it ``pgcode``. A driver
+    that exposes neither returns ``None``, and the caller falls back to the
+    exception class.
+
+    Args:
+        exc: the wrapped database error.
+
+    Returns:
+        The SQLSTATE, or ``None`` when the driver does not expose one.
+    """
+    original: object = exc.orig
+    for attribute in ("sqlstate", "pgcode"):
+        code: object = getattr(original, attribute, None)
+        if isinstance(code, str) and len(code) == 5:
+            return code
+    return None
+
+
+def _is_position_taken(exc: DBAPIError) -> bool:
+    """Return whether ``exc`` means another writer already holds this sequence number.
+
+    Decided on :data:`UNIQUE_VIOLATION_SQLSTATE`, not on the exception class.
+    The class is too coarse: a CHECK violation and a foreign-key failure are
+    ``IntegrityError`` too, and translating either into a *retryable*
+    ``ConcurrentTransitionError`` would send the caller round a loop that can
+    never succeed. Only ``23505`` means "that position is taken", and both of
+    the database's two refusal paths carry it (see
+    :data:`UNIQUE_VIOLATION_SQLSTATE`).
+
+    Args:
+        exc: the wrapped database error raised by the transition insert.
+
+    Returns:
+        ``True`` when the row was refused because its position is already held.
+
+    Note:
+        When the driver exposes no SQLSTATE the class is used as a fallback,
+        which is the best available answer for a driver that will not say —
+        never a silent widening for one that will.
+    """
+    sqlstate = _sqlstate(exc)
+    if sqlstate is not None:
+        return sqlstate == UNIQUE_VIOLATION_SQLSTATE
+    return isinstance(exc, IntegrityError)
 
 
 def _require_aware(name: str, moment: dt.datetime) -> None:
@@ -672,6 +744,12 @@ async def append_transition(
     try:
         async with session.begin_nested():
             await session.execute(statement)
-    except IntegrityError as exc:
+    except DBAPIError as exc:
+        if not _is_position_taken(exc):
+            # A chain error, a CHECK violation, a foreign-key failure: all real
+            # refusals of a malformed row, none of them retryable. Translating
+            # them into ConcurrentTransitionError would tell the caller to try
+            # again forever.
+            raise
         raise ConcurrentTransitionError(order_id=order_id, sequence_number=sequence_number) from exc
     return row

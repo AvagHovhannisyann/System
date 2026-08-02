@@ -26,6 +26,7 @@ import sqlalchemy as sa
 from backend.db import models
 from backend.execution.lifecycle import TERMINAL_STATES, TRANSITIONS
 from backend.execution.orders import PAPER_FILL_COST_BASIS, ExecutionVenue, FillSource
+from backend.execution.store import UNIQUE_VIOLATION_SQLSTATE
 
 _ORDER_TABLE = cast("sa.Table", models.ExecutionOrder.__table__)
 _TRANSITION_TABLE = cast("sa.Table", models.ExecutionOrderTransition.__table__)
@@ -215,6 +216,7 @@ def test_the_chain_guard_runs_before_every_insert() -> None:
     for condition in (
         "IF NEW.sequence_number <> 1 THEN",
         "IF NEW.from_state <> 'draft' THEN",
+        "IF NEW.sequence_number <= previous.sequence_number THEN",
         "IF NEW.sequence_number <> previous.sequence_number + 1 THEN",
         "IF NEW.from_state <> previous.to_state THEN",
         (
@@ -225,6 +227,24 @@ def test_the_chain_guard_runs_before_every_insert() -> None:
         ("IF NEW.to_state = 'filled' AND NEW.filled_quantity_after_shares <> ordered_shares THEN"),
     ):
         assert condition in flattened, condition
+
+
+def test_only_the_position_taken_branch_carries_the_unique_violation_code() -> None:
+    # The chain guard fires before every constraint, so a concurrent append is
+    # usually refused by *it* rather than by the primary key. Raising that one
+    # branch as unique_violation is what lets the store translate both routes on
+    # one SQLSTATE instead of matching message text. Every other branch must
+    # keep the default code: a gap, a disconnected chain and an overfill are all
+    # malformed rows, and retrying them would loop forever.
+    source = _source()
+    assert source.count("USING ERRCODE") == 1
+    assert source.count("USING ERRCODE = 'unique_violation'") == 1
+    flattened = re.sub(r"\s+", " ", source)
+    position_taken = flattened.index("IF NEW.sequence_number <= previous.sequence_number THEN")
+    errcode = flattened.index("USING ERRCODE = 'unique_violation'")
+    gap = flattened.index("IF NEW.sequence_number <> previous.sequence_number + 1 THEN")
+    assert position_taken < errcode < gap
+    assert UNIQUE_VIOLATION_SQLSTATE == "23505"
 
 
 def test_the_downgrade_removes_everything_the_upgrade_creates() -> None:

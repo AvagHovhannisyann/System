@@ -1,20 +1,32 @@
 """The store: idempotent submission, the append-only trail, and behaviour under contention.
 
 The uniqueness that makes a retry safe belongs to the database, so these tests
-run against an in-memory double that models the two constraints atomically (see
+run against an in-memory double that models its refusals atomically (see
 ``fixtures.PaperOrderStoreDouble``). They prove the store's *control flow* is
 correct when writers race. That Postgres actually enforces the constraints is
 proved in ``backend/tests/integration/test_order_lifecycle.py``, which needs a
-container and cannot run while Docker is down.
+container.
+
+The double's first version modelled a concurrent transition append as the primary
+key refusing the loser. Real Postgres refuses it through the ``BEFORE INSERT``
+chain guard instead, which fires ahead of every constraint — so this whole file
+was green while the integration suite failed. The double now refuses in the
+database's order and with the database's SQLSTATEs, and the tests at the end of
+this file pin the retryable/malformed distinction the store decides on.
 """
 
 from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import importlib
 from decimal import Decimal
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import pytest
+from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from backend.execution.errors import (
     ConcurrentTransitionError,
@@ -35,6 +47,9 @@ from backend.execution.idempotency import (
 from backend.execution.lifecycle import INITIAL_STATE, OrderEvent, OrderState
 from backend.execution.orders import FillReport, FillSource
 from backend.execution.store import (
+    UNIQUE_VIOLATION_SQLSTATE,
+    _is_position_taken,
+    _sqlstate,
     append_transition,
     load_order,
     load_order_by_key,
@@ -42,13 +57,29 @@ from backend.execution.store import (
 )
 from backend.tests.execution.fixtures import (
     MOMENT,
+    RAISE_EXCEPTION_SQLSTATE,
+    DriverError,
     PaperOrderStoreDouble,
     as_session,
     make_intent,
     order_columns,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 CONCURRENT_WRITERS = 16
+
+
+def _asyncpg_exception(name: str) -> Any:  # noqa: ANN401 - asyncpg ships no type information
+    """Return one of asyncpg's generated exception classes by name."""
+    return getattr(importlib.import_module("asyncpg.exceptions"), name)
+
+
+def _asyncpg_dbapi() -> Any:  # noqa: ANN401 - the shim's constructor is untyped
+    """Return SQLAlchemy's asyncpg DBAPI shim, which owns the error-class mapping."""
+    factory = cast("Callable[[ModuleType], Any]", AsyncAdapt_asyncpg_dbapi)
+    return factory(importlib.import_module("asyncpg"))
 
 
 async def _release_and_acknowledge(double: PaperOrderStoreDouble, order_id: int) -> None:
@@ -454,3 +485,182 @@ async def test_a_cancel_that_races_a_fill_is_representable() -> None:
     loaded = await load_order(session, recorded.order_id)
     assert loaded.state is OrderState.PARTIALLY_FILLED
     assert loaded.filled_quantity_shares == 30
+
+
+async def test_a_position_taken_refusal_is_retryable_whichever_route_it_arrives_by() -> None:
+    # Both of the database's refusal paths — the primary key and the chain
+    # guard's `USING ERRCODE = 'unique_violation'` — carry SQLSTATE 23505, and
+    # the store must translate on the code rather than on the exception class.
+    double = PaperOrderStoreDouble()
+    recorded = await record_order(as_session(double), make_intent())
+    await append_transition(
+        as_session(double),
+        order_id=recorded.order_id,
+        event=OrderEvent.RELEASE,
+        occurred_at=MOMENT,
+    )
+    for original in (
+        IntegrityError("INSERT", {}, DriverError(UNIQUE_VIOLATION_SQLSTATE, "pk conflict")),
+        DBAPIError("INSERT", {}, DriverError(UNIQUE_VIOLATION_SQLSTATE, "trigger conflict")),
+    ):
+        assert _is_position_taken(original) is True
+
+
+async def test_a_malformed_row_is_not_reported_as_a_retryable_conflict() -> None:
+    # The failure this guard exists for: telling a caller to retry a row the
+    # database will refuse every time is worse than failing once. A chain error
+    # (P0001) and a CHECK violation (23514, still an IntegrityError) must both
+    # pass through untranslated.
+    chain_error = DBAPIError("INSERT", {}, DriverError(RAISE_EXCEPTION_SQLSTATE, "gap"))
+    check_error = IntegrityError("INSERT", {}, DriverError("23514", "check violation"))
+    assert _is_position_taken(chain_error) is False
+    assert _is_position_taken(check_error) is False
+
+
+async def test_the_class_is_the_fallback_only_when_no_sqlstate_is_exposed() -> None:
+    # A driver that will not name a code gets the best available answer; one
+    # that will is never second-guessed.
+    silent = IntegrityError("INSERT", {}, Exception("driver exposes no code"))
+    assert _is_position_taken(silent) is True
+    assert _is_position_taken(DBAPIError("INSERT", {}, Exception("no code"))) is False
+
+
+def _refuse_as_chain_error(_double: PaperOrderStoreDouble, values: dict[str, object]) -> NoReturn:
+    """Stand in for the chain guard refusing a malformed row under ``P0001``."""
+    raise DBAPIError(
+        "INSERT INTO execution_order_transition",
+        values,
+        DriverError(RAISE_EXCEPTION_SQLSTATE, "order 1 is at sequence 3, so the next is 4, not 9"),
+    )
+
+
+async def test_a_chain_refusal_reaches_the_caller_unchanged() -> None:
+    # End to end: the store must let a non-retryable refusal through. Before CI
+    # the double could only produce one kind of error, so this distinction had
+    # no test that could fail.
+    double = PaperOrderStoreDouble()
+    recorded = await record_order(as_session(double), make_intent())
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(PaperOrderStoreDouble, "_insert_transition", _refuse_as_chain_error)
+        with pytest.raises(DBAPIError) as raised:
+            await append_transition(
+                as_session(double),
+                order_id=recorded.order_id,
+                event=OrderEvent.RELEASE,
+                occurred_at=MOMENT,
+            )
+    assert not isinstance(raised.value, ConcurrentTransitionError)
+    assert _sqlstate(raised.value) == RAISE_EXCEPTION_SQLSTATE
+
+
+def test_the_driver_maps_the_two_refusals_to_different_exception_classes() -> None:
+    """Pin the driver behaviour the SQLSTATE decision rests on.
+
+    This is the fact that made the first CI run fail, checked here without a
+    database so it cannot drift silently:
+
+    - a plpgsql ``RAISE EXCEPTION`` with no code of its own (``P0001``) arrives
+      as asyncpg's ``RaiseError``, whose nearest mapped ancestor is the *generic*
+      DBAPI ``Error`` — so it is a ``DBAPIError`` and **not** an
+      ``IntegrityError``. An ``except IntegrityError`` around the transition
+      insert therefore never saw the chain guard's refusals at all;
+    - ``unique_violation`` (``23505``) arrives as ``IntegrityError``, which is
+      why migration 0014 gives the trigger's position-taken branch that code;
+    - ``check_violation`` (``23514``) *also* arrives as ``IntegrityError``, which
+      is why the class alone is not a safe test for "retryable".
+    """
+    dbapi = _asyncpg_dbapi()
+    mapping = dbapi._asyncpg_error_translate
+
+    def resolved(error: Any) -> Any:  # noqa: ANN401 - asyncpg ships no type information
+        return next(mapping[base] for base in error.__mro__ if base in mapping)
+
+    unique = _asyncpg_exception("UniqueViolationError")
+    check = _asyncpg_exception("CheckViolationError")
+    raised = _asyncpg_exception("RaiseError")
+    assert unique.sqlstate == UNIQUE_VIOLATION_SQLSTATE
+    assert raised.sqlstate == RAISE_EXCEPTION_SQLSTATE
+    assert resolved(unique) is dbapi.IntegrityError
+    assert resolved(check) is dbapi.IntegrityError
+    assert resolved(raised) is dbapi.Error
+    assert not issubclass(dbapi.Error, dbapi.IntegrityError)
+
+
+def test_the_sqlstate_decision_separates_what_the_class_cannot() -> None:
+    # The consequence of the mapping above: a CHECK violation is an
+    # IntegrityError too, so deciding on the class would send a caller round a
+    # retry loop for a row the database refuses every time.
+    check_violation = str(_asyncpg_exception("CheckViolationError").sqlstate)
+    for sqlstate, retryable in (
+        (UNIQUE_VIOLATION_SQLSTATE, True),
+        (check_violation, False),
+        (RAISE_EXCEPTION_SQLSTATE, False),
+    ):
+        error = IntegrityError("INSERT", {}, DriverError(sqlstate, "refused"))
+        assert _is_position_taken(error) is retryable, sqlstate
+
+
+def _refuse_as_taken_position_without_integrity_error(
+    _double: PaperOrderStoreDouble, values: dict[str, object]
+) -> NoReturn:
+    """Deliver a taken position as a *generic* ``DBAPIError``, not an ``IntegrityError``."""
+    raise DBAPIError(
+        "INSERT INTO execution_order_transition",
+        values,
+        DriverError(UNIQUE_VIOLATION_SQLSTATE, "position taken"),
+    )
+
+
+async def test_the_translation_follows_the_sqlstate_not_the_exception_class() -> None:
+    """A retryable refusal is recognised however the driver classes it.
+
+    ``except IntegrityError`` is what missed the chain guard's refusals in the
+    first CI run — asyncpg maps a plpgsql ``RAISE`` to the *generic* DBAPI error
+    class. Catching ``DBAPIError`` and deciding on the SQLSTATE is the fix, and
+    this is the case that tells the two apart: ``23505`` arriving on a class that
+    is not ``IntegrityError``. Narrowing the catch again makes this fail.
+    """
+    double = PaperOrderStoreDouble()
+    recorded = await record_order(as_session(double), make_intent())
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            PaperOrderStoreDouble,
+            "_insert_transition",
+            _refuse_as_taken_position_without_integrity_error,
+        )
+        with pytest.raises(ConcurrentTransitionError):
+            await append_transition(
+                as_session(double),
+                order_id=recorded.order_id,
+                event=OrderEvent.RELEASE,
+                occurred_at=MOMENT,
+            )
+
+
+def test_the_double_refuses_positions_the_way_the_database_refuses_them() -> None:
+    """The double's own contract, asserted directly rather than left implicit.
+
+    CI proved that a double modelling the wrong layer hides a bug in the code it
+    stands in for, and a double nothing tests is free to drift back. Its three
+    rules are pinned here: at or below the tail is a taken position (``23505``,
+    retryable), above the next one is a gap (``P0001``, not retryable), and the
+    next one lands.
+
+    The ``below`` case cannot be produced through :func:`record_order` — the
+    store always computes ``tail + 1`` from its own read — but the database
+    produces it whenever a competing writer appended more than one row, so the
+    double has to model it.
+    """
+    double = PaperOrderStoreDouble()
+    double.transitions[1] = [{"sequence_number": index} for index in (1, 2, 3)]
+    for taken in (1, 2, 3):
+        with pytest.raises(IntegrityError) as conflict:
+            double._insert_transition({"order_id": 1, "sequence_number": taken})
+        assert _sqlstate(conflict.value) == UNIQUE_VIOLATION_SQLSTATE, taken
+        assert _is_position_taken(conflict.value) is True, taken
+    with pytest.raises(DBAPIError) as gap:
+        double._insert_transition({"order_id": 1, "sequence_number": 5})
+    assert _sqlstate(gap.value) == RAISE_EXCEPTION_SQLSTATE
+    assert _is_position_taken(gap.value) is False
+    double._insert_transition({"order_id": 1, "sequence_number": 4})
+    assert len(double.transitions[1]) == 4

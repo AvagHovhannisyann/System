@@ -20,24 +20,41 @@ the half the design actually rests on:
   therefore cannot be a CHECK at all.
 - **the append-only triggers** rejecting ``UPDATE`` and ``DELETE``.
 
-**Not executed in this environment.** The Docker daemon is unavailable where this
-was written, so the Testcontainers fixture cannot start and every test in this
-module errors on the environment rather than on its assertions. They are
-deliberately **not** skipped or xfailed (I6): a skipped test reports success it
-did not earn, and the next environment with a working daemon must see these run
-and either pass or fail on their merits.
+What the first CI run found
+--------------------------
+
+This module was written where no Docker daemon was available, so it had never
+executed. Its first run failed five tests, and none of the five was a typo — each
+was a claim the local unit suite structurally could not check:
+
+- **A ``BEFORE INSERT`` trigger fires ahead of every CHECK constraint.** Four
+  tests aimed a raw ``INSERT`` at a named CHECK while also breaking a chain
+  property, so the chain guard refused the row first and the CHECK was never
+  consulted. Every one of them now builds a valid chain prefix (see
+  :func:`walk_to_acknowledged`) so the constraint under test is the only thing
+  violated, and asserts the constraint's name in the message rather than merely
+  that *something* refused it.
+- **A concurrent append is usually refused by that trigger, not by the primary
+  key.** Under ``READ COMMITTED`` a losing writer's ``INSERT`` takes a fresh
+  snapshot, so the trigger sees the winner's committed row and refuses before the
+  index is consulted. The in-memory double modelled only the index, which is
+  exactly the gap a double is capable of hiding. Migration 0014 now raises that
+  branch ``USING ERRCODE = 'unique_violation'`` so both routes reach the store as
+  one SQLSTATE, and the store decides on the code rather than the class.
 
 Migration 0014 declares ``down_revision = "0013"`` and depends on that revision by
-identifier alone. Revision 0013 has since landed from its own track, so the chain
-is linear with a single head at 0014 — but the dependency was written before it
-existed and would have failed at the fixture rather than at an assertion, which
-is the correct shape for a cross-track dependency and is also not skipped.
+identifier alone; 0013 has since landed from its own track, so the chain is linear
+with a single head at 0014.
+
+Still not skipped, not xfailed (I6) — where the daemon is missing these error on
+the environment rather than reporting a success they did not earn.
 """
 
 from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import re
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -57,7 +74,14 @@ from backend.execution.orders import (
     Side,
     TimeInForce,
 )
-from backend.execution.store import append_transition, load_order, record_order
+from backend.execution.store import (
+    UNIQUE_VIOLATION_SQLSTATE,
+    _is_position_taken,
+    _sqlstate,
+    append_transition,
+    load_order,
+    record_order,
+)
 from backend.tests.execution.fixtures import make_stamp
 from backend.tests.integration.factories import create_security
 
@@ -131,13 +155,38 @@ async def seed_order(security_id: int, *, quantity_shares: int = 100) -> int:
 
 
 async def walk_to_acknowledged(order_id: int) -> None:
-    """Advance an order to ACKNOWLEDGED and commit."""
+    """Advance an order to ACKNOWLEDGED (sequence 2) and commit.
+
+    Every test that targets a CHECK constraint on a transition row starts here.
+    The ``BEFORE INSERT`` chain guard runs ahead of every constraint, so a raw
+    row that also breaks a chain property is refused by the *trigger* and the
+    CHECK is never consulted — which is how four tests in this module came to
+    name constraints they never reached.
+    """
     async with ingest_writer_session() as session:
         await append_transition(
             session, order_id=order_id, event=OrderEvent.RELEASE, occurred_at=MOMENT
         )
         await append_transition(
             session, order_id=order_id, event=OrderEvent.ACKNOWLEDGE, occurred_at=MOMENT
+        )
+        await session.commit()
+
+
+async def walk_to_filled(order_id: int, quantity_shares: int) -> None:
+    """Advance an order all the way to FILLED (sequence 3) and commit."""
+    await walk_to_acknowledged(order_id)
+    async with ingest_writer_session() as session:
+        await append_transition(
+            session,
+            order_id=order_id,
+            event=OrderEvent.FILL_COMPLETE,
+            occurred_at=MOMENT,
+            fill=FillReport(
+                quantity_shares=quantity_shares,
+                price_usd=Decimal("123.45"),
+                source=FillSource.PAPER_BROKER,
+            ),
         )
         await session.commit()
 
@@ -306,6 +355,20 @@ async def test_concurrent_distinct_submissions_all_land() -> None:
 
 
 async def test_concurrent_appends_of_one_event_leave_one_transition() -> None:
+    """Six writers claim sequence 1; one lands and five are told to re-read.
+
+    The losers are refused by **either** of two mechanisms depending on where
+    they are when the winner commits — the primary key if their ``INSERT``
+    reached the index first, the chain guard if their statement started
+    afterwards and its fresh ``READ COMMITTED`` snapshot already showed the
+    winner's row. Both carry SQLSTATE ``23505`` (migration 0014 gives the trigger
+    branch that code deliberately), so both become the same retryable error and
+    the test does not have to know which one fired.
+
+    The first version of this test asserted the same counts and passed against a
+    double that modelled only the index. It failed the moment CI ran it: five
+    writers were refused, none of them as ``ConcurrentTransitionError``.
+    """
     security_id = await create_security()
     order_id = await seed_order(security_id)
     gate = asyncio.Barrier(CONCURRENT_WRITERS)
@@ -315,12 +378,71 @@ async def test_concurrent_appends_of_one_event_leave_one_transition() -> None:
     )
     refused = [item for item in outcomes if isinstance(item, ConcurrentTransitionError)]
     written = [item for item in outcomes if not isinstance(item, BaseException)]
+    # Named explicitly so a stray exception type cannot hide inside "not
+    # written": every outcome must be one of the two the design allows.
+    assert len(written) + len(refused) == CONCURRENT_WRITERS, outcomes
     assert len(written) == 1
     assert len(refused) == CONCURRENT_WRITERS - 1
     async with ingest_writer_session() as session:
         loaded = await load_order(session, order_id)
     assert loaded.sequence_number == 1
     assert loaded.state is OrderState.PENDING_NEW
+
+
+async def test_the_chain_guard_refuses_a_taken_position_as_a_unique_violation() -> None:
+    """The dominant concurrent refusal, proved deterministically instead of by racing.
+
+    A writer whose statement starts after the winner committed never reaches the
+    index: the ``BEFORE INSERT`` trigger sees the winner's row first and refuses
+    it. That is reproduced here without a race by committing sequence 3 and then
+    re-issuing it, which puts the trigger in exactly the state a losing writer
+    puts it in.
+
+    The assertions are the whole chain the fix depends on: Postgres raises it as
+    ``23505``, and :func:`backend.execution.store._is_position_taken` — the
+    predicate that decides retryable from malformed — says yes to it.
+    """
+    security_id = await create_security()
+    order_id = await seed_order(security_id)
+    await walk_to_acknowledged(order_id)
+    taken = transition_values(
+        order_id=order_id,
+        sequence_number=3,
+        from_state=OrderState.ACKNOWLEDGED.value,
+        event=OrderEvent.REQUEST_CANCEL.value,
+        to_state=OrderState.PENDING_CANCEL.value,
+    )
+    await raw_insert(TRANSITION_INSERT, **taken)
+    with pytest.raises(IntegrityError) as raised:
+        await raw_insert(TRANSITION_INSERT, **taken)
+    assert _sqlstate(raised.value) == UNIQUE_VIOLATION_SQLSTATE
+    assert _is_position_taken(raised.value) is True
+    assert "another writer claimed it first" in str(raised.value)
+
+
+async def test_the_chain_guard_keeps_a_gap_out_of_the_retryable_code() -> None:
+    """A gap is malformed, not contended, and must not arrive as ``23505``.
+
+    Retrying it would loop forever, so the trigger leaves this branch under the
+    default ``raise_exception`` code and the store lets it through unchanged.
+    """
+    security_id = await create_security()
+    order_id = await seed_order(security_id)
+    await walk_to_acknowledged(order_id)
+    with pytest.raises(DBAPIError) as raised:
+        await raw_insert(
+            TRANSITION_INSERT,
+            **transition_values(
+                order_id=order_id,
+                sequence_number=9,
+                from_state=OrderState.ACKNOWLEDGED.value,
+                event=OrderEvent.REQUEST_CANCEL.value,
+                to_state=OrderState.PENDING_CANCEL.value,
+            ),
+        )
+    assert _sqlstate(raised.value) != UNIQUE_VIOLATION_SQLSTATE
+    assert _is_position_taken(raised.value) is False
+    assert "the next transition is 3, not 9" in str(raised.value)
 
 
 async def test_a_duplicate_key_is_refused_by_the_database_not_by_python() -> None:
@@ -404,69 +526,147 @@ async def test_a_limit_order_without_a_price_is_refused_by_the_database() -> Non
 
 
 async def test_a_transition_out_of_a_terminal_state_is_refused_by_the_database() -> None:
-    # FILLED -> PENDING_NEW, issued as raw SQL. The CHECK is what makes it
-    # unrepresentable rather than merely unreachable through this package.
+    """``FILLED -> PENDING_NEW`` as raw SQL, on a chain that is otherwise valid.
+
+    The order is walked to ``FILLED`` first so the appended row satisfies every
+    chain property the ``BEFORE INSERT`` trigger checks — it is sequence 4 after
+    sequence 3, it starts where the previous row ended, and it trades nothing.
+    The trigger therefore passes and a CHECK is the only thing left to refuse it.
+
+    **Two CHECKs necessarily refuse it together**, and that is a property of the
+    schema rather than a looseness in the test: every triple with a terminal
+    ``from_state`` is also absent from the enumerated table, so no input can
+    isolate ``from_state_not_terminal``. The assertion names both and requires
+    one of them, which is the strongest true claim available.
+    """
     security_id = await create_security()
-    order_id = await seed_order(security_id)
-    with pytest.raises(IntegrityError):
+    order_id = await seed_order(security_id, quantity_shares=10)
+    await walk_to_filled(order_id, 10)
+    with pytest.raises(IntegrityError) as raised:
         await raw_insert(
             TRANSITION_INSERT,
             **transition_values(
                 order_id=order_id,
+                sequence_number=4,
                 from_state=OrderState.FILLED.value,
                 event=OrderEvent.RELEASE.value,
                 to_state=OrderState.PENDING_NEW.value,
+                filled_quantity_after_shares=10,
             ),
         )
+    assert re.search(r"from_state_not_terminal|legal_transition", str(raised.value))
 
 
 async def test_a_transition_outside_the_enumerated_table_is_refused() -> None:
+    """A non-terminal triple absent from the 25, isolating ``legal_transition``.
+
+    ``acknowledged + acknowledge -> acknowledged`` is a self-loop the machine
+    does not have. It passes the chain guard (sequence 3 after 2, starts where
+    the previous row ended, trades nothing), and ``from_state`` is not terminal,
+    so ``legal_transition`` is the only constraint it violates.
+    """
     security_id = await create_security()
     order_id = await seed_order(security_id)
-    with pytest.raises(IntegrityError):
-        await raw_insert(
-            TRANSITION_INSERT,
-            **transition_values(
-                order_id=order_id,
-                from_state=OrderState.ACKNOWLEDGED.value,
-                event=OrderEvent.RELEASE.value,
-                to_state=OrderState.PENDING_NEW.value,
-            ),
-        )
-
-
-async def test_a_non_fill_event_carrying_a_payload_is_refused() -> None:
-    security_id = await create_security()
-    order_id = await seed_order(security_id)
-    with pytest.raises(IntegrityError):
-        await raw_insert(
-            TRANSITION_INSERT,
-            **transition_values(
-                order_id=order_id,
-                fill_quantity_shares=10,
-                fill_price_usd=Decimal("1"),
-                fill_source=FillSource.SIMULATED.value,
-                fill_cost_basis="lower_bound",
-            ),
-        )
-
-
-async def test_a_fill_event_missing_its_payload_is_refused() -> None:
-    security_id = await create_security()
-    order_id = await seed_order(security_id, quantity_shares=10)
     await walk_to_acknowledged(order_id)
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError) as raised:
         await raw_insert(
             TRANSITION_INSERT,
             **transition_values(
                 order_id=order_id,
                 sequence_number=3,
                 from_state=OrderState.ACKNOWLEDGED.value,
-                event=OrderEvent.FILL_COMPLETE.value,
-                to_state=OrderState.FILLED.value,
-                filled_quantity_after_shares=10,
+                event=OrderEvent.ACKNOWLEDGE.value,
+                to_state=OrderState.ACKNOWLEDGED.value,
             ),
         )
+    assert "legal_transition" in str(raised.value)
+
+
+async def test_a_non_fill_event_carrying_a_payload_is_refused() -> None:
+    """A payload on a non-fill event, with the chain arithmetic left consistent.
+
+    The trigger sums ``COALESCE(fill_quantity_shares, 0)`` whatever the event is,
+    so a payload of 10 shares must be matched by a cumulative of 10 or the
+    trigger refuses the row before ``fill_payload_absent`` is reached. With the
+    arithmetic satisfied and the triple legal, that CHECK is the only violation
+    left — a quantity on a row that reports no trade.
+    """
+    security_id = await create_security()
+    order_id = await seed_order(security_id)
+    await walk_to_acknowledged(order_id)
+    with pytest.raises(IntegrityError) as raised:
+        await raw_insert(
+            TRANSITION_INSERT,
+            **transition_values(
+                order_id=order_id,
+                sequence_number=3,
+                from_state=OrderState.ACKNOWLEDGED.value,
+                event=OrderEvent.REQUEST_CANCEL.value,
+                to_state=OrderState.PENDING_CANCEL.value,
+                filled_quantity_after_shares=10,
+                fill_quantity_shares=10,
+                fill_price_usd=Decimal("1"),
+                fill_source=FillSource.SIMULATED.value,
+                fill_cost_basis="lower_bound",
+            ),
+        )
+    assert "fill_payload_absent" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("missing", "quantity", "cumulative"),
+    [
+        ("fill_price_usd", 40, 40),
+        ("fill_source", 40, 40),
+        ("fill_cost_basis", 40, 40),
+        ("fill_quantity_shares", None, 0),
+    ],
+    ids=["price", "source", "cost_basis", "quantity"],
+)
+async def test_a_fill_event_missing_part_of_its_payload_is_refused(
+    missing: str, quantity: int | None, cumulative: int
+) -> None:
+    """``fill_payload_present`` refuses a fill missing any one of its four columns.
+
+    The original version of this test aimed at ``fill_complete`` with a NULL
+    quantity and never reached the CHECK: with no quantity the trigger's running
+    sum stays where it was, while ``fill_complete -> filled`` requires the order
+    to be fully traded, so the trigger refused it first. That combination is in
+    fact **unreachable** — reaching ``filled`` always means the cumulative
+    quantity equals the ordered quantity, which cannot happen with nothing
+    traded.
+
+    ``partial_fill`` is reachable, and so the CHECK is not subsumed by the
+    trigger. Each of the four columns is dropped in turn; a NULL quantity keeps
+    the cumulative where it was so the trigger still passes, and the other three
+    leave the arithmetic untouched. Each row therefore violates
+    ``fill_payload_present`` and nothing else — the ``IS NULL OR ...`` shape of
+    the sibling CHECKs means an absent value satisfies them.
+    """
+    security_id = await create_security()
+    order_id = await seed_order(security_id)
+    await walk_to_acknowledged(order_id)
+    payload: dict[str, object] = {
+        "fill_quantity_shares": quantity,
+        "fill_price_usd": Decimal("123.45"),
+        "fill_source": FillSource.SIMULATED.value,
+        "fill_cost_basis": "lower_bound",
+    }
+    payload[missing] = None
+    with pytest.raises(IntegrityError) as raised:
+        await raw_insert(
+            TRANSITION_INSERT,
+            **transition_values(
+                order_id=order_id,
+                sequence_number=3,
+                from_state=OrderState.ACKNOWLEDGED.value,
+                event=OrderEvent.PARTIAL_FILL.value,
+                to_state=OrderState.PARTIALLY_FILLED.value,
+                filled_quantity_after_shares=cumulative,
+                **payload,
+            ),
+        )
+    assert "fill_payload_present" in str(raised.value)
 
 
 async def test_a_live_fill_source_is_refused_by_the_database() -> None:

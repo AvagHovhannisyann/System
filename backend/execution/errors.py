@@ -270,6 +270,16 @@ class ConcurrentTransitionError(ExecutionError, RuntimeError):
     that read the same tail both try to write the same sequence number, and the
     database rejects the loser. That rejection is this error.
 
+    **The rejection arrives by one of two routes**, and which one depends only
+    on where the loser is when the winner commits. If the loser's ``INSERT``
+    reached the index first it blocks there and fails on the primary key; if it
+    starts after the winner committed, the ``BEFORE INSERT`` chain guard sees
+    the winner's row — ``READ COMMITTED`` gives every statement a fresh snapshot,
+    so the trigger sees a tail the loser's own earlier ``SELECT`` did not — and
+    refuses it before the index is consulted. Migration 0014 raises that case
+    with SQLSTATE ``unique_violation`` so both routes are one condition here
+    rather than two, one of which nobody would have thought to catch.
+
     It is a **retryable** condition, not corruption: the loser re-reads the tail
     (which now includes the winner's row) and decides again — its event may or
     may not still be legal from the new state, and that is the point. The

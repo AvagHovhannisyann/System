@@ -347,6 +347,22 @@ def upgrade() -> None:
                         'trades %', NEW.order_id, NEW.filled_quantity_after_shares, traded;
                 END IF;
             ELSE
+                -- Position already held. Raised as unique_violation on purpose:
+                -- it is the same refusal the primary key gives, arriving by a
+                -- different route, and the caller must not have to tell them
+                -- apart. Under READ COMMITTED a writer whose INSERT starts
+                -- after the winner committed reaches *this* branch rather than
+                -- the index, because each statement takes a fresh snapshot.
+                IF NEW.sequence_number <= previous.sequence_number THEN
+                    RAISE EXCEPTION
+                        'order % is already at sequence %, so position % is taken; another '
+                        'writer claimed it first — re-read the history and decide again',
+                        NEW.order_id, previous.sequence_number, NEW.sequence_number
+                        USING ERRCODE = 'unique_violation';
+                END IF;
+                -- A gap is a different failure: nobody holds the position, the
+                -- writer skipped one. Not retryable, so it keeps the default
+                -- raise_exception code and reaches the caller as a chain error.
                 IF NEW.sequence_number <> previous.sequence_number + 1 THEN
                     RAISE EXCEPTION
                         'order % is at sequence %, so the next transition is %, not %',

@@ -951,3 +951,52 @@ the way through.
 venue's cancel-*rejection* must return the order to where it actually was; with a single
 pending-cancel state that target depends on cumulative filled quantity, which would make the
 machine a function of its own arithmetic.
+
+## D-034 — A plpgsql RAISE is not an IntegrityError, and a double that omits SQLSTATE hides that (2026-08-02)
+
+**What CI found.** P11.2's 25 integration tests had never executed — no Docker daemon here.
+Their first real run failed five, and none was a typo. The asyncpg driver maps Postgres
+conditions to SQLAlchemy classes like this:
+
+| Postgres condition | asyncpg | SQLAlchemy |
+|---|---|---|
+| `P0001` plpgsql `RAISE EXCEPTION` | `RaiseError` | generic **`DBAPIError`** |
+| `23505` unique_violation | `UniqueViolationError` | `IntegrityError` |
+| `23514` check_violation | `CheckViolationError` | `IntegrityError` |
+
+That one table explains all five. Four tests caught `IntegrityError` while a `BEFORE INSERT`
+trigger — which fires ahead of every CHECK — refused the row with `P0001`. And the
+concurrency test's five losers were refused by **the trigger, not the index**: under
+`READ COMMITTED` a losing writer's `INSERT` takes a fresh snapshot, so the chain guard sees
+the winner's committed row that the loser's own earlier `SELECT` did not.
+
+**Decision: decide on SQLSTATE, never on the exception class.** `store.py` now catches
+`DBAPIError` and reads `sqlstate`/`pgcode` off `exc.orig`. This also removes a *latent* bug
+the old code had: a CHECK violation is an `IntegrityError` too, so `except IntegrityError`
+would have reported a permanently-invalid row as a retryable conflict. Migration 0014 splits
+the trigger's sequence check — position at or below the tail raises
+`USING ERRCODE = 'unique_violation'` (the same refusal the primary key gives, arriving by
+another route), while a *gap* keeps `P0001`, because nobody holds that position and retrying
+it would loop forever.
+
+**Deliberate widening, flagged as the one judgement call:** the trigger now returns `23505`
+for any position at or below the tail, so a malformed manual insert reusing an old sequence
+number is reported as a conflict rather than a chain error. The position *is* taken and the
+primary key would say the same — but it is a widening, not a neutral refactor.
+
+**The lesson about the double is not "doubles lie".** It is narrower and more useful.
+`execution_order_transition` has a `BEFORE INSERT` trigger *and* a primary key; the double
+modelled only the key — that is, **it stood in for the wrong layer**, simulating the path
+that is *less* likely under contention. And its errors carried no SQLSTATE, so every refusal
+it produced looked identical to code that inspects the code. That second defect is what made
+the first invisible: no test could distinguish a correct store from one translating every
+failure into a retry. The double is now itself under test, because infrastructure nothing
+asserts is free to drift back.
+
+**A CHECK that no input can isolate is a property of the schema, not a gap in the tests.** A
+terminal `from_state` is necessarily also absent from the enumerated-transition table, so
+`from_state_not_terminal` cannot be reached alone; the test names both constraints and
+requires one. By contrast `fill_payload_present` *is* reachable — not via `fill_complete`
+(a NULL quantity cannot move the running sum, while `filled` demands a full trade) but via
+`partial_fill`, which carries no completeness requirement. The claim was kept and the input
+corrected, rather than the claim weakened to fit the first input tried.
