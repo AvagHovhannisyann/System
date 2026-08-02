@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import re
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from hypothesis import given
@@ -114,7 +115,7 @@ def test_equal_prices_written_differently_produce_one_key() -> None:
     )
 
 
-CHANGES = [
+CHANGES: list[tuple[str, dict[str, Any]]] = [
     ("security_id", {"security_id": 43}),
     ("side", {"side": Side.SELL}),
     ("quantity_shares", {"quantity_shares": 101}),
@@ -133,9 +134,7 @@ CHANGES = [
 
 
 @pytest.mark.parametrize(("field", "override"), CHANGES, ids=[name for name, _ in CHANGES])
-def test_changing_any_content_field_changes_the_key(
-    field: str, override: dict[str, object]
-) -> None:
+def test_changing_any_content_field_changes_the_key(field: str, override: dict[str, Any]) -> None:
     # Non-vacuity of the key: if a field can change without moving the key, two
     # different orders share an identity and one silently replaces the other.
     assert idempotency_key(make_intent()) != idempotency_key(make_intent(**override)), field

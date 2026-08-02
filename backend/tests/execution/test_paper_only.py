@@ -19,9 +19,10 @@ import re
 import token as token_module
 import tokenize
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 import pytest
+import sqlalchemy as sa
 
 import backend.execution
 from backend.execution import idempotency, lifecycle, orders, store
@@ -36,7 +37,6 @@ CODE_TOKENS: Final = frozenset({token_module.NAME, token_module.NUMBER, token_mo
 FORBIDDEN_NAMES: Final = frozenset(
     {
         "aiohttp",
-        "asyncio",
         "connect",
         "connectAsync",
         "endpoint",
@@ -50,8 +50,11 @@ FORBIDDEN_NAMES: Final = frozenset(
         "live",
         "os",
         "port",
+        "create_connection",
+        "open_connection",
         "requests",
         "socket",
+        "start_server",
         "ssl",
         "subprocess",
         "tws",
@@ -119,6 +122,7 @@ FORBIDDEN_PARAMETERS: Final = frozenset(
 IMPORT_ALLOWLIST: Final = frozenset(
     {
         "__future__",
+        "collections.abc",
         "dataclasses",
         "datetime",
         "decimal",
@@ -126,8 +130,13 @@ IMPORT_ALLOWLIST: Final = frozenset(
         "hashlib",
         "types",
         "typing",
+        # The database session type, and only that. `asyncio` is not on the
+        # forbidden-name list solely because it is a component of this module
+        # path; the test below pins it to exactly that use.
         "sqlalchemy",
         "sqlalchemy.exc",
+        "sqlalchemy.ext.asyncio",
+        "sqlalchemy.sql",
     }
 )
 
@@ -161,6 +170,21 @@ def test_the_package_has_modules_to_check() -> None:
 def test_no_module_names_anything_that_could_reach_a_venue(path: Path) -> None:
     used = {item.string for item in _code_tokens(path) if item.type == token_module.NAME}
     assert used & FORBIDDEN_NAMES == set(), sorted(used & FORBIDDEN_NAMES)
+
+
+def test_asyncio_appears_only_inside_the_sqlalchemy_session_module_path() -> None:
+    # `asyncio` can open connections, so its presence is checked rather than
+    # allowed outright: the only occurrence permitted is the `sqlalchemy.ext.
+    # asyncio` import path, which yields a database session and nothing else.
+    for path, tree in _trees():
+        source = path.read_text(encoding="utf-8")
+        if "asyncio" not in source:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                assert "asyncio" not in " ".join(alias.name for alias in node.names), path.name
+        occurrences = source.count("asyncio")
+        assert occurrences == source.count("sqlalchemy.ext.asyncio"), path.name
 
 
 @pytest.mark.parametrize("path", MODULE_PATHS, ids=lambda path: path.name)
@@ -275,23 +299,23 @@ def test_the_schema_pins_the_venue_and_the_fill_source() -> None:
     # Python entirely is still bound.
     from backend.db import models
 
+    order_table = cast("sa.Table", models.ExecutionOrder.__table__)
     order_checks = {
         str(constraint.name): str(constraint.sqltext)
-        for constraint in models.ExecutionOrder.__table__.constraints
-        if hasattr(constraint, "sqltext")
+        for constraint in order_table.constraints
+        if isinstance(constraint, sa.CheckConstraint)
     }
     assert order_checks["ck_execution_order_venue_is_paper"] == "venue = 'paper'"
+    transition_table = cast("sa.Table", models.ExecutionOrderTransition.__table__)
     transition_checks = {
         str(constraint.name): str(constraint.sqltext)
-        for constraint in models.ExecutionOrderTransition.__table__.constraints
-        if hasattr(constraint, "sqltext")
+        for constraint in transition_table.constraints
+        if isinstance(constraint, sa.CheckConstraint)
     }
     source_check = transition_checks["ck_execution_order_transition_fill_source_is_not_live"]
     assert "'simulated'" in source_check
     assert "'paper_broker'" in source_check
-    basis_check = transition_checks[
-        "ck_execution_order_transition_fill_cost_basis_is_lower_bound"
-    ]
+    basis_check = transition_checks["ck_execution_order_transition_fill_cost_basis_is_lower_bound"]
     assert "'lower_bound'" in basis_check
 
 
@@ -299,8 +323,12 @@ def test_the_order_table_has_no_writable_venue_path() -> None:
     # The column exists, carries a server default, and no code supplies it.
     from backend.db import models
 
-    column = models.ExecutionOrder.__table__.columns["venue"]
-    assert column.server_default is not None
-    assert "paper" in str(column.server_default.arg)
+    column = cast("sa.Table", models.ExecutionOrder.__table__).columns["venue"]
+    default = column.server_default
+    assert default is not None
+    assert "paper" in str(getattr(default, "arg", default))
+    # No writer names the column: `stored_venue` (the value read back and
+    # refused) is deliberately a different identifier, so this scan cannot be
+    # satisfied by a rename.
     source = (PACKAGE_ROOT / "store.py").read_text(encoding="utf-8")
-    assert "venue=" not in source.replace("venue=venue", "")
+    assert re.search(r"(?<![\w])venue\s*=", source) is None

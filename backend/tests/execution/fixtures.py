@@ -166,6 +166,11 @@ class PaperOrderStoreDouble:
         self.transitions: dict[int, list[dict[str, object]]] = {}
         self.order_insert_attempts = 0
         self.transition_insert_attempts = 0
+        self.insert_barrier: asyncio.Barrier | None = None
+        """Set to an ``asyncio.Barrier`` of N parties to force N writers to arrive
+        at the contention point simultaneously. Without it the scheduler may
+        happen to run the callers one after another, and a test that passes
+        because nothing actually raced has proved nothing."""
         self._next_order_id = 1
 
     def begin_nested(self) -> _Savepoint:
@@ -195,6 +200,8 @@ class PaperOrderStoreDouble:
         """
         await asyncio.sleep(0)
         if isinstance(statement, Insert):
+            if self.insert_barrier is not None:
+                await self.insert_barrier.wait()
             return self._insert(statement)
         if isinstance(statement, Select):
             return self._select(statement)
@@ -251,7 +258,7 @@ class PaperOrderStoreDouble:
         """Apply a SELECT, routed by the columns it projects."""
         columns = list(statement.selected_columns.keys())
         params = dict(statement.compile().params)
-        table = statement.get_final_froms()[0].name
+        table = cast("sa.Table", statement.get_final_froms()[0]).name
         if table == "execution_order":
             return _Result(self._select_orders(columns, params))
         if table == "execution_order_transition":
@@ -314,4 +321,4 @@ def order_columns(intent: OrderIntent, *, idempotency_key: str, preimage: str) -
 
 def statement_tables(statement: sa.Select[Any]) -> list[str]:
     """Return the table names a select reads, for assertions about read shape."""
-    return [source.name for source in statement.get_final_froms()]
+    return [cast("sa.Table", source).name for source in statement.get_final_froms()]

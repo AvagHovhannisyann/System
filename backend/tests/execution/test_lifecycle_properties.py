@@ -96,18 +96,25 @@ def test_the_filled_state_is_only_ever_entered_with_a_completing_fill(
         state = target
 
 
+def _outcome(state: OrderState, event: OrderEvent) -> OrderState | IllegalTransitionError:
+    """Return the resulting state, or the refusal, without raising through the test."""
+    try:
+        return apply_event(state, event)
+    except IllegalTransitionError as refused:
+        return refused
+
+
 @given(state=states, event=events)
 def test_every_pair_is_either_applied_or_refused_with_a_named_reason(
     state: OrderState, event: OrderEvent
 ) -> None:
-    try:
-        target = apply_event(state, event)
-    except IllegalTransitionError as refused:
+    outcome = _outcome(state, event)
+    if isinstance(outcome, IllegalTransitionError):
         assert (state, event) in ILLEGAL_TRANSITIONS
-        assert refused.refusal == ILLEGAL_TRANSITIONS[state, event]
-        assert isinstance(refused, TerminalOrderError) == (state in TERMINAL_STATES)
+        assert outcome.refusal == ILLEGAL_TRANSITIONS[state, event]
+        assert isinstance(outcome, TerminalOrderError) == (state in TERMINAL_STATES)
         return
-    assert TRANSITIONS[state, event] is target
+    assert TRANSITIONS[state, event] is outcome
 
 
 def test_every_legal_state_is_reachable_by_some_event_sequence() -> None:

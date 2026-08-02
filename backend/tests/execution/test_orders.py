@@ -44,7 +44,7 @@ def test_a_non_positive_quantity_is_refused(quantity: int) -> None:
 def test_a_boolean_quantity_is_refused() -> None:
     # True is an int and would silently record as one share.
     with pytest.raises(OrderValidationError, match="bool is refused"):
-        make_intent(quantity_shares=True)  # type: ignore[arg-type]
+        make_intent(quantity_shares=True)
 
 
 def test_a_limit_order_without_a_price_is_refused() -> None:
@@ -134,9 +134,7 @@ def test_the_defaults_describe_a_tradeable_instruction() -> None:
 def test_a_fill_report_labels_its_cost_basis_as_a_lower_bound() -> None:
     # D-013: paper and simulated fills are optimistic, so slippage measured from
     # them bounds the true cost from below and is never an estimate of it.
-    report = FillReport(
-        quantity_shares=10, price_usd=Decimal("12.34"), source=FillSource.SIMULATED
-    )
+    report = FillReport(quantity_shares=10, price_usd=Decimal("12.34"), source=FillSource.SIMULATED)
     assert report.cost_basis == PAPER_FILL_COST_BASIS == "lower_bound"
 
 
@@ -156,9 +154,7 @@ def test_a_fill_report_states_where_it_came_from() -> None:
 @pytest.mark.parametrize("quantity", [0, -1])
 def test_a_fill_report_refuses_a_non_positive_quantity(quantity: int) -> None:
     with pytest.raises(OrderValidationError, match="strictly positive"):
-        FillReport(
-            quantity_shares=quantity, price_usd=Decimal("1"), source=FillSource.SIMULATED
-        )
+        FillReport(quantity_shares=quantity, price_usd=Decimal("1"), source=FillSource.SIMULATED)
 
 
 def test_a_fill_report_refuses_a_non_positive_price() -> None:
@@ -178,7 +174,5 @@ def test_a_fill_report_refuses_a_blank_venue_identifier() -> None:
 
 
 def test_a_fill_report_accepts_an_absent_venue_identifier() -> None:
-    report = FillReport(
-        quantity_shares=1, price_usd=Decimal("1"), source=FillSource.SIMULATED
-    )
+    report = FillReport(quantity_shares=1, price_usd=Decimal("1"), source=FillSource.SIMULATED)
     assert report.venue_fill_id is None

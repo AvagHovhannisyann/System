@@ -175,20 +175,16 @@ def test_every_non_terminal_state_has_a_way_out() -> None:
 
 
 def test_fill_events_are_exactly_the_two_that_carry_a_quantity() -> None:
-    assert FILL_EVENTS == frozenset({OrderEvent.PARTIAL_FILL, OrderEvent.FILL_COMPLETE})
+    assert frozenset({OrderEvent.PARTIAL_FILL, OrderEvent.FILL_COMPLETE}) == FILL_EVENTS
 
 
 def test_fill_event_is_decided_by_arithmetic() -> None:
     assert (
-        fill_event(
-            ordered_quantity_shares=100, filled_before_shares=0, fill_quantity_shares=40
-        )
+        fill_event(ordered_quantity_shares=100, filled_before_shares=0, fill_quantity_shares=40)
         is OrderEvent.PARTIAL_FILL
     )
     assert (
-        fill_event(
-            ordered_quantity_shares=100, filled_before_shares=60, fill_quantity_shares=40
-        )
+        fill_event(ordered_quantity_shares=100, filled_before_shares=60, fill_quantity_shares=40)
         is OrderEvent.FILL_COMPLETE
     )
 
@@ -260,7 +256,7 @@ def test_replay_of_an_empty_history_is_a_draft() -> None:
 def test_replay_refuses_a_gap_in_the_sequence() -> None:
     history = _chain((OrderEvent.RELEASE, None), (OrderEvent.ACKNOWLEDGE, None))
     broken = [history[0], replace(history[1], sequence_number=3)]
-    with pytest.raises(TransitionChainError, match="1..n with no"):
+    with pytest.raises(TransitionChainError, match=r"1\.\.n with no"):
         replay(broken, ordered_quantity_shares=100)
 
 
