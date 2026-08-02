@@ -1493,3 +1493,804 @@ class UniverseMember(Base):
             "The waterfall attributes the exclusion to element 0."
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 tables (P11.2, migration 0014): the order management system
+#
+# Two tables, **append-only** by the same ``BEFORE UPDATE OR DELETE`` row-trigger
+# shape revisions 0003/0004/0007/0009/0010/0011 use:
+#
+# - ``execution_order`` — the immutable content of one order, plus the
+#   content-derived idempotency key that makes a retried submission a no-op. It
+#   carries **no state column**, deliberately: an append-only table cannot update
+#   one, and a denormalized state that could drift from the history is the exact
+#   condition the transition log exists to make impossible. Current state is
+#   ``backend.execution.lifecycle.replay`` over the transitions.
+# - ``execution_order_transition`` — the audit trail: one row per state change,
+#   in a gapless per-order sequence, carrying the fill payload on fill events and
+#   nothing on any other.
+#
+# Neither is bitemporal, for the reason recorded above the Phase 4 tables: the
+# bitemporal columns describe when a fact was true in the world and when it
+# became knowable to the *market* (D-011). An order is a decision **we** took and
+# an event stream **we** were sent; its point-in-time content is the ``as_of``
+# already baked into the reproducibility stamp of the plan that produced it.
+# Inventing a ``knowledge_time`` for it would be a fabricated value in the one
+# column whose meaning is that it is not fabricated (I3).
+#
+# Neither is a hypertable: a daily-rebalanced book of a few hundred names
+# produces thousands of orders a year, not an event-time stream worth chunking.
+#
+# **Paper-only is enforced here, not merely observed.** ``venue`` carries a
+# server default and a ``CHECK (venue = 'paper')`` constraint, and no writer —
+# ORM, raw INSERT or COPY — supplies it; ``fill_source`` is constrained to two
+# non-live literals so a live execution has no representation at all; and
+# ``fill_cost_basis`` is constrained to ``'lower_bound'`` so no fill can claim to
+# be a calibrated estimate of cost (D-013). See ``backend/execution/orders.py``
+# for the structural argument these constraints restate.
+# ---------------------------------------------------------------------------
+
+
+class ExecutionOrder(Base):
+    """One order: its content, its idempotency key, and the stamp that produced it (P11.2).
+
+    Every column is immutable content. The row records *what was instructed*;
+    what happened to it lives entirely in :class:`ExecutionOrderTransition`, and
+    the current state is derived by replaying that log rather than stored here.
+    That split is what makes the append-only trigger sufficient: there is no
+    field whose value legitimately changes, so a table that refuses UPDATE loses
+    nothing.
+
+    **Identity is** ``idempotency_key``, and it is UNIQUE. The key is a SHA-256
+    digest of ``idempotency_preimage`` — the canonical JSON of the order's own
+    content, including the four I2 stamp components — computed by
+    :mod:`backend.execution.idempotency`. Two workers racing to submit the same
+    order both compute the same key, and the database lets exactly one of them
+    insert it. The constraint is the enforcement point; the Python code around it
+    only decides what to do with the loser.
+
+    The preimage is stored beside the digest so the digest is *verifiable*: a
+    stored key that does not hash from its stored preimage, or a preimage that
+    disagrees with a resubmitted order, is
+    :class:`~backend.execution.errors.IdempotencyCollisionError` rather than a
+    silent substitution of one trade for another.
+
+    Units: ``quantity_shares`` is whole shares; ``limit_price_usd`` is US dollars
+    per share; ``rebalance_date`` is a calendar date with no time component.
+    """
+
+    __tablename__ = "execution_order"
+    __table_args__ = (
+        # The enforcement point for idempotency (I2, P11.2). Not an index for
+        # lookups — the lookups are a side benefit — but the constraint that
+        # makes a duplicate submission fail in the database rather than in a
+        # check-then-insert window no application can close.
+        UniqueConstraint("idempotency_key", name="uq_execution_order_idempotency_key"),
+        # CHECK names are given unprefixed: the metadata naming convention
+        # (ck_%(table_name)s_%(constraint_name)s) expands them, so an
+        # already-prefixed name would double the prefix and diverge from the
+        # names migration 0014 creates.
+        #
+        # Paper-only, at the database. There is no writer that supplies this
+        # column and no enum member other than 'paper', so this constraint is
+        # the third independent statement of the same fact (directive §1.1,
+        # §9.5) and the only one that binds a writer bypassing Python entirely.
+        CheckConstraint("venue = 'paper'", name="venue_is_paper"),
+        CheckConstraint("quantity_shares > 0", name="quantity_shares_positive"),
+        CheckConstraint("security_id > 0", name="security_id_positive"),
+        CheckConstraint("side IN ('buy', 'sell')", name="side_is_known"),
+        CheckConstraint("order_type IN ('market', 'limit')", name="order_type_is_known"),
+        CheckConstraint("time_in_force IN ('day', 'gtc')", name="time_in_force_is_known"),
+        # The type and the price together are the instruction; either half alone
+        # is ambiguous. Two-sided, in the D-030 shape: a limit order without a
+        # price and a market order with one are both refused, because merely
+        # forbidding one direction trades a fabrication bug for a silent-absence
+        # bug pointing the other way.
+        CheckConstraint(
+            "(order_type = 'limit') = (limit_price_usd IS NOT NULL)",
+            name="limit_price_iff_limit_order",
+        ),
+        CheckConstraint(
+            "limit_price_usd IS NULL OR limit_price_usd > 0",
+            name="limit_price_positive",
+        ),
+        CheckConstraint(
+            "slice_count >= 1 AND slice_index >= 0 AND slice_index < slice_count",
+            name="slice_within_count",
+        ),
+        # The key must be a SHA-256 digest, not any string a caller invented:
+        # a key that is not a content digest is a counter wearing a digest's
+        # clothes, and a counter cannot survive the restart it exists to.
+        CheckConstraint("idempotency_key ~ '^[0-9a-f]{64}$'", name="idempotency_key_is_sha256"),
+        CheckConstraint("idempotency_preimage <> ''", name="idempotency_preimage_present"),
+        CheckConstraint("idempotency_schema <> ''", name="idempotency_schema_present"),
+        # I2: all four stamp components present on every order, so every fill
+        # traces to the commit and config that produced the decision.
+        CheckConstraint("git_commit ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'", name="git_commit_is_sha"),
+        CheckConstraint("config_hash ~ '^[0-9a-f]{64}$'", name="config_hash_is_sha256"),
+        CheckConstraint("data_version <> ''", name="data_version_present"),
+        CheckConstraint("seed >= 0", name="seed_non_negative"),
+    )
+
+    order_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+        doc="Surrogate row key, database-generated. Dimensionless.",
+    )
+    idempotency_key: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "SHA-256 hex digest of idempotency_preimage (64 lowercase hex characters). "
+            "UNIQUE: this is where a duplicate submission is refused."
+        ),
+    )
+    idempotency_schema: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "Version of the preimage recipe "
+            "(backend.execution.idempotency.IDEMPOTENCY_SCHEMA). Recorded per row so keys "
+            "computed under two recipes are distinguishable after the fact."
+        ),
+    )
+    idempotency_preimage: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "The canonical JSON the key was hashed from — stored so the digest is "
+            "verifiable, and so a resubmission whose content differs is detected rather "
+            "than absorbed as the same trade."
+        ),
+    )
+    venue: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'paper'"),
+        doc=(
+            "Execution venue. Always 'paper', by CHECK constraint and by there being no "
+            "other member of backend.execution.orders.ExecutionVenue. No writer supplies "
+            "it; the server default does. Directive §1.1 and §9.5: live trading is not "
+            "configurable, so a non-paper value is a corruption, not a setting."
+        ),
+    )
+    security_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("security.security_id"),
+        nullable=False,
+        doc=(
+            "The security to trade, by identity-anchor key. Not the bitemporal master: a "
+            "versioned table's logical key is not unique per row and cannot be an FK target."
+        ),
+    )
+    side: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="'buy' or 'sell'. Direction lives here, never in the sign of the quantity.",
+    )
+    quantity_shares: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        doc="Shares to trade (whole shares), strictly positive.",
+    )
+    order_type: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="'market' or 'limit'.",
+    )
+    time_in_force: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="'day' or 'gtc'. Intraday instruments (IOC/FOK) are out of scope (§1.1).",
+    )
+    limit_price_usd: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 6),
+        nullable=True,
+        doc=(
+            "Limit price in US dollars per share, present exactly when order_type = 'limit' "
+            "(CHECK, both directions). Numeric rather than float: an order's identity is "
+            "hashed from its text, and a binary float has no exact decimal rendering."
+        ),
+    )
+    rebalance_date: Mapped[dt.date] = mapped_column(
+        Date,
+        nullable=False,
+        doc=(
+            "The rebalance this order implements (calendar date, no time part). Part of the "
+            "order's hashed identity: the same target position on two dates is two orders."
+        ),
+    )
+    slice_index: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+        doc=(
+            "Zero-based slice index within a parent order; 0 when unsliced. Part of the "
+            "hashed identity, so a TWAP's slices are distinct orders rather than one order "
+            "submitted repeatedly (P11.4)."
+        ),
+    )
+    slice_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("1"),
+        doc="Number of slices the parent was divided into; 1 when unsliced. Dimensionless.",
+    )
+    git_commit: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="I2: full commit SHA of the code that produced this order.",
+    )
+    git_dirty: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        doc=(
+            "I2: whether the working tree differed from HEAD when the stamp was taken. True "
+            "means the order is not regenerable from git_commit alone, and the row says so "
+            "rather than recording the commit it was nearly produced from."
+        ),
+    )
+    data_version: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="I2: identifier of the data snapshot the decision read.",
+    )
+    config_hash: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="I2: SHA-256 hex digest of the canonical config (64 lowercase hex characters).",
+    )
+    seed: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        doc="I2: the random seed the producing run used, recorded verbatim. Dimensionless.",
+    )
+    recorded_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc=(
+            "When the row was written, UTC, from the database clock at transaction start. "
+            "Wall-clock provenance only — never a knowledge time, and never an ordering key "
+            "(order_id is). Deliberately absent from the idempotency preimage: a key that "
+            "moved with the clock would make every retry a new order."
+        ),
+    )
+
+
+class ExecutionOrderTransition(Base):
+    """One recorded state change of one order — the append-only audit trail (P11.2).
+
+    The order's whole history, one row per event, in a gapless per-order sequence
+    starting at 1. Current state is the fold of this log
+    (:func:`backend.execution.lifecycle.replay`), never a stored field, so there
+    is no denormalized value that can come to disagree with the history that
+    justifies it.
+
+    **The primary key is the concurrency control.** ``(order_id,
+    sequence_number)`` is unique, and each writer computes ``last + 1`` from the
+    tail it read. Two writers that read the same tail try to claim the same
+    sequence number and the database rejects the loser
+    (:class:`~backend.execution.errors.ConcurrentTransitionError`), which is a
+    retryable condition rather than corruption: the loser re-reads, and its event
+    may or may not still be legal from the state that now holds. Optimistic
+    rather than a lock because the contended case is rare and a lock held across
+    a broker round trip is how an OMS deadlocks itself.
+
+    **Illegal transitions are refused by the database, not only by Python.** Two
+    constraints restate
+    :data:`backend.execution.lifecycle.TRANSITIONS`: ``from_state_not_terminal``
+    bans any transition out of a terminal state — this is what makes ``FILLED ->
+    PENDING_NEW`` unrepresentable — and ``legal_transition`` enumerates the 25
+    legal ``(from_state, event, to_state)`` triples. A third, the
+    ``execution_transition_chain_guard`` trigger (migration 0014), checks each
+    row against its predecessor: the sequence is gapless, the chain connects, and
+    the cumulative fill quantity is the running sum and never exceeds the order's
+    quantity.
+
+    **Fill payload columns follow D-030's two-sided rule.** They are present
+    exactly on fill events and NULL on every other, enforced in both directions:
+    a non-fill row carrying a quantity would be a trade nobody reported, and a
+    fill row missing one would be a trade whose size is a gap. ``fill_source``
+    admits only non-live values (I3) and ``fill_cost_basis`` only
+    ``'lower_bound'`` (D-013).
+
+    Units: quantities are whole shares; ``fill_price_usd`` is US dollars per
+    share.
+    """
+
+    __tablename__ = "execution_order_transition"
+    __table_args__ = (
+        CheckConstraint("sequence_number >= 1", name="sequence_number_positive"),
+        # The named property this whole table exists to guarantee. Implied by
+        # legal_transition below, and stated separately anyway: it is the one
+        # constraint whose violation produces a phantom position, and a reader
+        # grepping for it should find it by name.
+        CheckConstraint(
+            "from_state NOT IN ('filled', 'cancelled', 'rejected', 'expired')",
+            name="from_state_not_terminal",
+        ),
+        # The 25 legal triples of backend.execution.lifecycle.TRANSITIONS,
+        # restated in SQL. A test compares the two so they cannot drift.
+        CheckConstraint(
+            "(from_state, event, to_state) IN ("
+            "('draft', 'release', 'pending_new'), "
+            "('draft', 'abandon', 'cancelled'), "
+            "('pending_new', 'acknowledge', 'acknowledged'), "
+            "('pending_new', 'reject', 'rejected'), "
+            "('pending_new', 'expire', 'expired'), "
+            "('acknowledged', 'partial_fill', 'partially_filled'), "
+            "('acknowledged', 'fill_complete', 'filled'), "
+            "('acknowledged', 'request_cancel', 'pending_cancel'), "
+            "('acknowledged', 'expire', 'expired'), "
+            "('acknowledged', 'venue_cancel', 'cancelled'), "
+            "('partially_filled', 'partial_fill', 'partially_filled'), "
+            "('partially_filled', 'fill_complete', 'filled'), "
+            "('partially_filled', 'request_cancel', 'pending_cancel_partial'), "
+            "('partially_filled', 'expire', 'expired'), "
+            "('partially_filled', 'venue_cancel', 'cancelled'), "
+            "('pending_cancel', 'cancel_confirmed', 'cancelled'), "
+            "('pending_cancel', 'cancel_rejected', 'acknowledged'), "
+            "('pending_cancel', 'partial_fill', 'pending_cancel_partial'), "
+            "('pending_cancel', 'fill_complete', 'filled'), "
+            "('pending_cancel', 'expire', 'expired'), "
+            "('pending_cancel_partial', 'cancel_confirmed', 'cancelled'), "
+            "('pending_cancel_partial', 'cancel_rejected', 'partially_filled'), "
+            "('pending_cancel_partial', 'partial_fill', 'pending_cancel_partial'), "
+            "('pending_cancel_partial', 'fill_complete', 'filled'), "
+            "('pending_cancel_partial', 'expire', 'expired'))",
+            name="legal_transition",
+        ),
+        CheckConstraint(
+            "filled_quantity_after_shares >= 0",
+            name="filled_quantity_after_non_negative",
+        ),
+        # D-030 shape, both directions. Present on a fill:
+        CheckConstraint(
+            "event NOT IN ('partial_fill', 'fill_complete') OR ("
+            "fill_quantity_shares IS NOT NULL AND fill_price_usd IS NOT NULL "
+            "AND fill_source IS NOT NULL AND fill_cost_basis IS NOT NULL)",
+            name="fill_payload_present",
+        ),
+        # ...and absent on everything else, so a non-fill row cannot carry a
+        # quantity or a price that no venue ever reported.
+        CheckConstraint(
+            "event IN ('partial_fill', 'fill_complete') OR ("
+            "fill_quantity_shares IS NULL AND fill_price_usd IS NULL "
+            "AND fill_source IS NULL AND fill_cost_basis IS NULL "
+            "AND venue_fill_id IS NULL)",
+            name="fill_payload_absent",
+        ),
+        CheckConstraint(
+            "fill_quantity_shares IS NULL OR fill_quantity_shares > 0",
+            name="fill_quantity_positive",
+        ),
+        CheckConstraint(
+            "fill_price_usd IS NULL OR fill_price_usd > 0",
+            name="fill_price_positive",
+        ),
+        # I3: a live fill has no representation. Not a disabled option — an
+        # absent one. Adding a third value needs a migration, not a config edit.
+        CheckConstraint(
+            "fill_source IS NULL OR fill_source IN ('simulated', 'paper_broker')",
+            name="fill_source_is_not_live",
+        ),
+        # D-013: paper fills bound slippage from below. A row claiming any other
+        # basis would let a later calibration treat an optimistic fill as a
+        # measured estimate, which is the single easiest way to turn a losing
+        # strategy into a winning backtest.
+        CheckConstraint(
+            "fill_cost_basis IS NULL OR fill_cost_basis = 'lower_bound'",
+            name="fill_cost_basis_is_lower_bound",
+        ),
+        CheckConstraint("venue_fill_id IS NULL OR venue_fill_id <> ''", name="venue_fill_id_set"),
+    )
+
+    order_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("execution_order.order_id"),
+        primary_key=True,
+        doc="The order whose history this row extends.",
+    )
+    sequence_number: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        doc=(
+            "Position in this order's history, 1-based and gapless. The ordering key — "
+            "never a timestamp — and, with order_id, the uniqueness that turns two "
+            "concurrent writers into one winner and one retryable loser."
+        ),
+    )
+    from_state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="The state the order was in. Never a terminal state (CHECK).",
+    )
+    event: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="The event applied (backend.execution.lifecycle.OrderEvent).",
+    )
+    to_state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="The resulting state. The (from_state, event, to_state) triple is CHECKed.",
+    )
+    filled_quantity_after_shares: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        doc=(
+            "Cumulative shares filled after this event (whole shares). Stored rather than "
+            "recomputed so a truncated history is detectable instead of merely shorter; the "
+            "chain-guard trigger checks it against the previous row's value plus this row's "
+            "fill quantity."
+        ),
+    )
+    fill_quantity_shares: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        doc=(
+            "Shares traded by this event (whole shares); NULL on every event that is not a "
+            "fill. Absent rather than zero: a zero is a quantity nobody reported (D-030)."
+        ),
+    )
+    fill_price_usd: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 6),
+        nullable=True,
+        doc="Price traded at, US dollars per share; NULL on every non-fill event.",
+    )
+    fill_source: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc=(
+            "'simulated' or 'paper_broker'; NULL on every non-fill event. There is no value "
+            "denoting a live execution (I3): a simulated fill and a paper-broker fill are "
+            "different values on the row, so neither can be mistaken for the other and "
+            "neither can be mistaken for a real one."
+        ),
+    )
+    fill_cost_basis: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc=(
+            "Always 'lower_bound' when present, NULL on every non-fill event (D-013). Paper "
+            "and simulated fills are optimistic — they fill at the touch and model no queue "
+            "position — so slippage measured from them bounds the true cost from below and "
+            "is never an estimate of it. The label travels on the row so the qualification "
+            "reaches every query, export and blotter."
+        ),
+    )
+    venue_fill_id: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc=(
+            "The venue's identifier for this execution, when it gave one; NULL when it did "
+            "not, and NULL on every non-fill event. Absent rather than invented (I3)."
+        ),
+    )
+    occurred_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        doc=(
+            "When the event happened at its origin, UTC: the venue's timestamp for a "
+            "venue-reported event, ours for a locally-originated one. Never an ordering key "
+            "— sequence_number is — because venue clocks and ours disagree and the "
+            "disagreement is information, not noise to be sorted away."
+        ),
+    )
+    recorded_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc=(
+            "When the row was written, UTC, from the database clock at transaction start. "
+            "Wall-clock provenance only; the gap between this and occurred_at is the "
+            "system's own latency, which P11.3 reads and nothing else should."
+        ),
+    )
+    note: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc=(
+            "Free text from the caller — a venue reject reason, an operator's justification "
+            "for a manual cancel. Never parsed; the structured meaning is in event."
+        ),
+    )
+
+
+class LlmSpendLedger(Base):
+    """One spend event against one provider's cap (P7.7, §6.5, I4).
+
+    **An event log, not a running total.** Three kinds of row —
+    ``reserved``, ``released``, ``settled`` — tied together by
+    ``reservation_id``, each carrying a signed :attr:`delta_amount`, so a
+    window's committed spend is ``SUM(delta_amount)`` over that window's rows.
+    Nothing is ever updated, which is what makes this an audit trail rather
+    than a number whose history has been overwritten (§6.11: configuration
+    changes are events, not mutations — spend is no different). Migration 0013
+    installs the same ``BEFORE UPDATE OR DELETE`` trigger the rest of this
+    schema uses.
+
+    Why an event log rather than a balance: the cap is enforced **before** the
+    call, against an *upper bound* on what the call will cost, and reconciled
+    afterwards against what it actually cost. Both figures are worth keeping.
+    A balance would keep neither, and "how wrong was the estimate" — the
+    question that says whether the bound is doing its job or quietly strangling
+    a budget — would be unanswerable.
+
+    Why :attr:`served_model` exists beside :attr:`requested_model`: §6.5 makes
+    the ceiling behaviour configurable between halting and degrading to a
+    cheaper model, and a degraded call is answered by a model the caller did
+    not ask for. A result attributed to a model that never read the document is
+    not reproducible from its recorded configuration (I2), so both models are
+    recorded on every row and the substitution is visible as
+    ``requested_model <> served_model`` — which the ``degraded_iff_substituted``
+    CHECK ties to the flag rather than leaving the two free to disagree.
+
+    Not bitemporal, for the same reason ``llm_provider_credential`` and
+    ``config_change_event`` are not: the bitemporal columns describe when a fact
+    was true in the world and when it became knowable to the *market* (D-011).
+    Spending our own money on our own extraction has no market knowability, and
+    a ``knowledge_time`` invented for it would be a fabricated value in the one
+    column whose meaning is that it is not fabricated (I3).
+
+    Units and assumptions:
+
+    - every monetary column is ``NUMERIC(20, 10)`` in the **major unit** of the
+      currency named by :attr:`currency` (dollars, not cents), at ten decimal
+      places because cost-tier models are priced in fractions of a cent per
+      call and a two-decimal column would round a real call to zero;
+    - :attr:`currency` is an ISO-4217 alphabetic code. There are no exchange
+      rates in this system, so rows in different currencies are never summed
+      together — a cap and the prices checked against it must agree;
+    - token columns are dimensionless counts. The ``_bound`` pair is the
+      **upper bound** the estimate used; :attr:`input_tokens` and
+      :attr:`output_tokens` are counts **as reported by the provider** and are
+      NULL when it reported none, never estimated (I3);
+    - :attr:`daily_window` is a UTC calendar day (``YYYY-MM-DD``) and
+      :attr:`monthly_window` a UTC calendar month (``YYYY-MM``). UTC because it
+      is the only clock this platform stores anything in — not because it is
+      any vendor's billing day.
+    """
+
+    __tablename__ = "llm_spend_ledger"
+    __table_args__ = (
+        # One settlement and one release per reservation, enforced by the
+        # database rather than by the application's memory: double-counting a
+        # delta corrupts every later cap check, and the check that would catch
+        # it in Python runs in a different transaction.
+        UniqueConstraint("reservation_id", "event", name="uq_llm_spend_ledger_reservation_event"),
+        # CHECK names are given unprefixed: the metadata naming convention
+        # (ck_%(table_name)s_%(constraint_name)s) expands them, so an
+        # already-prefixed name would produce ck_..._ck_... and diverge from the
+        # names migration 0013 creates.
+        CheckConstraint(f"provider IN ({PROVIDER_NAMES_SQL})", name="provider_known"),
+        CheckConstraint("event IN ('reserved', 'released', 'settled')", name="event_known"),
+        CheckConstraint("policy IN ('halt', 'degrade')", name="policy_known"),
+        CheckConstraint(
+            "outcome IS NULL OR outcome IN ('succeeded', 'failed')", name="outcome_known"
+        ),
+        CheckConstraint("reservation_id <> ''", name="reservation_id_not_empty"),
+        CheckConstraint("requested_model <> ''", name="requested_model_not_empty"),
+        CheckConstraint("served_model <> ''", name="served_model_not_empty"),
+        CheckConstraint("currency ~ '^[A-Z]{3}$'", name="currency_is_iso4217_alpha"),
+        CheckConstraint("daily_window ~ '^\\d{4}-\\d{2}-\\d{2}$'", name="daily_window_shape"),
+        CheckConstraint("monthly_window ~ '^\\d{4}-\\d{2}$'", name="monthly_window_shape"),
+        # A cost is never negative; the *delta* is signed, because a settlement
+        # normally hands headroom back.
+        CheckConstraint("estimated_cost >= 0", name="estimated_cost_non_negative"),
+        CheckConstraint("actual_cost IS NULL OR actual_cost >= 0", name="actual_cost_non_negative"),
+        CheckConstraint("daily_limit >= 0", name="daily_limit_non_negative"),
+        CheckConstraint("monthly_limit >= 0", name="monthly_limit_non_negative"),
+        CheckConstraint("input_tokens_bound >= 0", name="input_tokens_bound_non_negative"),
+        CheckConstraint("output_tokens_bound >= 1", name="output_tokens_bound_positive"),
+        CheckConstraint("input_tokens IS NULL OR input_tokens >= 0", name="input_tokens_counted"),
+        CheckConstraint(
+            "output_tokens IS NULL OR output_tokens >= 0", name="output_tokens_counted"
+        ),
+        # The event algebra, asserted in the schema so a row cannot claim an
+        # arithmetic the ledger does not do:
+        #   reserved  -> delta = +estimate
+        #   released  -> delta = -estimate
+        #   settled   -> delta = coalesce(actual, estimate) - estimate
+        CheckConstraint(
+            "(event = 'reserved' AND delta_amount = estimated_cost) "
+            "OR (event = 'released' AND delta_amount = -estimated_cost) "
+            "OR (event = 'settled' "
+            "    AND delta_amount = COALESCE(actual_cost, estimated_cost) - estimated_cost)",
+            name="delta_matches_event",
+        ),
+        # An outcome belongs to a completed call and to nothing else.
+        CheckConstraint("(outcome IS NOT NULL) = (event = 'settled')", name="outcome_iff_settled"),
+        # "Reconciled" means the cost is a measurement rather than the bound.
+        CheckConstraint("reconciled = (actual_cost IS NOT NULL)", name="reconciled_iff_measured"),
+        # A reservation and a release carry no provider-reported counts: nothing
+        # was reported yet, and inventing zeros would read as a free call.
+        CheckConstraint(
+            "event = 'settled' OR (input_tokens IS NULL AND output_tokens IS NULL)",
+            name="tokens_only_on_settlement",
+        ),
+        CheckConstraint(
+            "degraded = (requested_model <> served_model)", name="degraded_iff_substituted"
+        ),
+    )
+
+    ledger_id: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(),
+        primary_key=True,
+        doc="Surrogate row key, database-generated. Dimensionless; also the append order.",
+    )
+    reservation_id: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "32-character hex UUID4 tying one call's reserved row to its settled or released "
+            "row. Generated in the process, before the row exists, because a reservation is "
+            "referred to across the provider call that sits between the two writes."
+        ),
+    )
+    event: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="'reserved', 'released' or 'settled' — see the class docstring's event algebra.",
+    )
+    provider: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="Provider whose cap this row moves, e.g. 'anthropic'. Not an FK — a spend record "
+        "outlives the credential, and deleting a key must not erase what it spent.",
+    )
+    requested_model: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="Qualified model identifier the caller asked for, e.g. 'anthropic:some-model'.",
+    )
+    served_model: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc=(
+            "Qualified model that actually answered. Differs from requested_model exactly when "
+            "the cap degraded the call. This is the column that makes a degraded result "
+            "reproducible (I2)."
+        ),
+    )
+    currency: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="ISO-4217 alphabetic code every monetary column on this row is denominated in.",
+    )
+    estimated_cost: Mapped[Decimal] = mapped_column(
+        Numeric(20, 10),
+        nullable=False,
+        doc=(
+            "The UPPER BOUND on this call's cost, in the currency's major unit — max output "
+            "tokens at the model's output rate plus a bound on the prompt at its input rate. "
+            "Not an expectation: the cap is checked before the response exists, and an "
+            "expectation would leak by exactly the amount it was optimistic."
+        ),
+    )
+    actual_cost: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 10),
+        nullable=True,
+        doc=(
+            "What the call really cost, from provider-reported token counts, in the currency's "
+            "major unit. NULL on reserved and released rows, and on a settlement where the "
+            "provider reported no counts — that row settles at the bound rather than at a "
+            "re-estimate, because an estimated actual is a fabricated measurement (I3)."
+        ),
+    )
+    delta_amount: Mapped[Decimal] = mapped_column(
+        Numeric(20, 10),
+        nullable=False,
+        doc=(
+            "This row's SIGNED contribution to its windows' committed spend, in the currency's "
+            "major unit. Committed spend is SUM(delta_amount) over the window; a settlement's "
+            "delta is normally negative, handing back the difference between the bound and the "
+            "truth."
+        ),
+    )
+    input_tokens_bound: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="Upper bound on prompt tokens used by the estimate (count). Never a measurement.",
+    )
+    output_tokens_bound: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc=(
+            "Upper bound on response tokens used by the estimate (count) — the request's "
+            "max_tokens, which the provider cannot exceed, so this bound is exact."
+        ),
+    )
+    input_tokens: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        doc="Prompt tokens AS REPORTED by the provider (count), or NULL. Never estimated (I3).",
+    )
+    output_tokens: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        doc="Response tokens as reported (count), or NULL. Never estimated (I3).",
+    )
+    daily_window: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="UTC calendar day this row is booked to, 'YYYY-MM-DD'. Not any vendor's billing day.",
+    )
+    monthly_window: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="UTC calendar month this row is booked to, 'YYYY-MM'.",
+    )
+    daily_limit: Mapped[Decimal] = mapped_column(
+        Numeric(20, 10),
+        nullable=False,
+        doc=(
+            "The daily cap in force when this row was written, in the currency's major unit. "
+            "Copied onto the row rather than joined at read time: a cap raised this afternoon "
+            "must not rewrite this morning's audit trail."
+        ),
+    )
+    monthly_limit: Mapped[Decimal] = mapped_column(
+        Numeric(20, 10),
+        nullable=False,
+        doc="The monthly cap in force when this row was written, same units and same reasoning.",
+    )
+    policy: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="'halt' or 'degrade' — the ceiling behaviour in force for this provider (§6.5).",
+    )
+    degraded: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        doc=(
+            "True when a cheaper model was substituted. Redundant with "
+            "requested_model <> served_model and tied to it by CHECK, because this is the "
+            "column an operator filters on and a derived predicate is easy to get wrong in a "
+            "hand-written query."
+        ),
+    )
+    outcome: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc=(
+            "'succeeded' or 'failed' on a settled row, NULL otherwise. A failed call still "
+            "settles — at its bound — because nothing observable says whether the request left "
+            "the host, and over-counting is the safe direction for a spend control."
+        ),
+    )
+    reconciled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        doc=(
+            "True exactly when actual_cost is a measurement. False means this row settled at "
+            "its upper bound, which over-counts deliberately."
+        ),
+    )
+    correlation_id: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc=(
+            "Request id (D-003) the call was made under, or NULL outside a request (a Celery "
+            "worker, a backfill script). What joins a spend row to the extraction it paid for."
+        ),
+    )
+    occurred_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        doc=(
+            "The UTC instant the window keys were computed from. The reserved row's value is "
+            "the authorization instant; a settlement carries its own. Never an ordering key — "
+            "ledger_id is."
+        ),
+    )
+    recorded_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        doc="When the row was written, UTC, from the database clock. Wall-clock provenance only.",
+    )

@@ -82,30 +82,42 @@ class IllegalTransitionError(ExecutionError, ValueError):
     """Raised when an event has no legal transition from the order's current state.
 
     The transition table in :mod:`backend.execution.lifecycle` is a partial
-    function: 22 of the 99 ``(state, event)`` pairs are legal, and the other 77
-    are not oversights. A venue acknowledgement for an order that was never
-    released, a cancel request for an order with no venue order id to cancel
-    with, a rejection of an order that has already traded — each names a
-    disagreement between our record and the venue's, and the honest response is
-    to refuse the transition and let reconciliation (P11.3) see the mismatch.
-    Applying it anyway would produce a state whose own history does not support
-    it, which is the failure that makes a blotter untrustworthy.
+    function: 25 of the 110 ``(state, event)`` pairs are legal, and the other 85
+    are not oversights — each carries a named
+    :class:`~backend.execution.lifecycle.TransitionRefusal`. A venue
+    acknowledgement for an order that was never released, a cancel request for
+    an order the venue has not accepted, a rejection of an order that has
+    already traded — each names a disagreement between our record and the
+    venue's, and the honest response is to refuse the transition and let
+    reconciliation (P11.3) see the mismatch. Applying it anyway would produce a
+    state whose own history does not support it, which is the failure that makes
+    a blotter untrustworthy.
+
+    ``refusal`` and ``reason`` are plain strings rather than the enum itself so
+    this module stays free of a runtime import of ``lifecycle`` (which imports
+    *this* module). :class:`~backend.execution.lifecycle.TransitionRefusal` is a
+    ``StrEnum``, so passing a member satisfies the annotation unchanged.
 
     Attributes:
         state: the state the order was in.
         event: the event that has no transition from it.
+        refusal: the named refusal classifying the pair.
+        reason: the prose for that refusal.
     """
 
-    def __init__(self, *, state: OrderState, event: OrderEvent) -> None:
-        """Build the error from the current state and the refused event."""
+    def __init__(self, *, state: OrderState, event: OrderEvent, refusal: str, reason: str) -> None:
+        """Build the error from the current state, the refused event and its reason."""
         self.state = state
         self.event = event
+        self.refusal = refusal
+        self.reason = reason
         super().__init__(
-            f"event {event.value!r} has no legal transition from state {state.value!r}. "
-            f"The order lifecycle is a partial function on (state, event) by design "
-            f"(backend.execution.lifecycle.TRANSITIONS): an event the current state cannot "
-            f"accept means our record and the venue's disagree, and recording it would "
-            f"produce a state the order's own history does not support"
+            f"event {event.value!r} has no legal transition from state {state.value!r} "
+            f"({refusal}): {reason}. The order lifecycle is a partial function on "
+            f"(state, event) by design (backend.execution.lifecycle.TRANSITIONS): an event "
+            f"the current state cannot accept means our record and the venue's disagree, "
+            f"and recording it would produce a state the order's own history does not "
+            f"support"
         )
 
 
@@ -120,22 +132,26 @@ class TerminalOrderError(IllegalTransitionError):
 
     Terminal states (``FILLED``, ``CANCELLED``, ``REJECTED``, ``EXPIRED``) have
     **zero** outgoing edges in the transition table. That is what makes
-    ``FILLED → PENDING_NEW`` unrepresentable rather than merely unlikely, and
-    migration 0014 restates it as a CHECK constraint so a writer that bypasses
-    this module entirely still cannot record one.
+    ``FILLED -> PENDING_NEW`` unrepresentable rather than merely unlikely, and
+    migration 0014 restates it as two CHECK constraints — one banning any
+    terminal ``from_state``, one enumerating the legal
+    ``(from_state, event, to_state)`` triples — so a writer that bypasses this
+    module entirely still cannot record one.
     """
 
-    def __init__(self, *, state: OrderState, event: OrderEvent) -> None:
-        """Build the error from the terminal state and the refused event."""
+    def __init__(self, *, state: OrderState, event: OrderEvent, refusal: str, reason: str) -> None:
+        """Build the error from the terminal state, the refused event and its reason."""
         self.state = state
         self.event = event
+        self.refusal = refusal
+        self.reason = reason
         ExecutionError.__init__(
             self,
-            f"order is in terminal state {state.value!r}; event {event.value!r} is refused. "
-            f"Terminal states have no outgoing transitions at all — an order that could "
-            f"leave FILLED would let the position implied by its fills and the position "
-            f"implied by its state disagree, which is the reconciliation bug this machine "
-            f"exists to prevent",
+            f"order is in terminal state {state.value!r}; event {event.value!r} is refused "
+            f"({refusal}): {reason}. Terminal states have no outgoing transitions at all — "
+            f"an order that could leave FILLED would let the position implied by its fills "
+            f"and the position implied by its state disagree, which is the reconciliation "
+            f"bug this machine exists to prevent",
         )
 
 
@@ -305,17 +321,23 @@ class NotPaperOrderError(ExecutionError, RuntimeError):
     §9.5: live trading is not configurable, so a non-paper order is not a
     configuration to honour but a corruption to refuse.
 
+    The constructor parameter is named ``stored_venue`` rather than ``venue``
+    deliberately: it is a value *read out of a row and refused*, never one a
+    caller chooses. Nothing in this package accepts a venue to act on, and the
+    paper-only test suite enforces that by scanning every parameter name.
+
     Attributes:
         order_id: the offending order's database key.
-        venue: the venue string found on the row.
+        stored_venue: the venue string found on the row.
     """
 
-    def __init__(self, *, order_id: int, venue: str) -> None:
+    def __init__(self, *, order_id: int, stored_venue: str) -> None:
         """Build the error from the order id and the unexpected venue string."""
         self.order_id = order_id
-        self.venue = venue
+        self.stored_venue = stored_venue
         super().__init__(
-            f"order_id={order_id} carries venue={venue!r}, which is not the paper venue. "
+            f"order_id={order_id} carries venue={stored_venue!r}, which is not the paper "
+            f"venue. "
             f"This platform is paper-only and permanently so (directive §1.1, §9.5): there "
             f"is no configuration that produces a non-paper order, so this row did not come "
             f"from this system. Refusing to load it"
