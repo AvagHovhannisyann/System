@@ -92,6 +92,13 @@ _NAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 _TABLE_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]*$")
 """A physical table name as PostgreSQL holds it: lowercase, unquoted."""
 
+_EARLIEST_INSTANT: Final = dt.datetime.min.replace(tzinfo=dt.UTC)
+"""The earliest instant :class:`datetime.datetime` can represent, in UTC.
+
+Named only so :meth:`FeatureSpec.knowledge_cutoff` can say where the subtraction
+ran out of range instead of letting an ``OverflowError`` escape unlabelled.
+"""
+
 
 def compute_instant(compute_date: dt.date) -> dt.datetime:
     """Return the UTC instant a compute date denotes: midnight opening the date.
@@ -172,6 +179,19 @@ class FeatureSpec:
         Raises:
             FeatureSpecError: naming the offending field and what it must be.
         """
+        # Every field is type-checked before it is inspected. The annotations
+        # are not enforcement: declarations also arrive from config files and
+        # test fixtures, where nothing has type-checked them, and a `None`
+        # reaching `.strip()` would escape this package's taxonomy as an
+        # AttributeError naming neither the feature nor the field.
+        declared_name: object = self.name
+        if not isinstance(declared_name, str):
+            msg = (
+                f"feature name {declared_name!r} is not a string. The name is the "
+                f"identifier this feature is known by in configs, model artifacts "
+                f"and the dashboard; it has to be text."
+            )
+            raise FeatureSpecError(msg)
         if not _NAME_PATTERN.fullmatch(self.name):
             msg = (
                 f"feature name {self.name!r} is not snake_case. Expected "
@@ -179,6 +199,14 @@ class FeatureSpec:
                 f"with a letter (e.g. 'momentum_12_1'). The name is a stable "
                 f"identifier across configs, artifacts and the dashboard, so it "
                 f"is pinned to one spelling rather than normalized."
+            )
+            raise FeatureSpecError(msg)
+        declared_definition: object = self.definition
+        if not isinstance(declared_definition, str):
+            msg = (
+                f"feature {self.name!r} declares a definition that is not a string "
+                f"({declared_definition!r}). The catalog shows this text to a human "
+                f"deciding whether the feature earns its place against the cap."
             )
             raise FeatureSpecError(msg)
         if not self.definition.strip():
@@ -189,6 +217,14 @@ class FeatureSpec:
                 f"judgement impossible."
             )
             raise FeatureSpecError(msg)
+        declared_units: object = self.units
+        if not isinstance(declared_units, str):
+            msg = (
+                f"feature {self.name!r} declares units {declared_units!r}, which is "
+                f"not a string. Units are required text (directive §8); say "
+                f"'dimensionless z-score' if that is the answer."
+            )
+            raise FeatureSpecError(msg)
         if not self.units.strip():
             msg = (
                 f"feature {self.name!r} has empty units. Units are required "
@@ -197,10 +233,6 @@ class FeatureSpec:
                 f"avoiding. Say 'dimensionless z-score' if that is the answer."
             )
             raise FeatureSpecError(msg)
-        # Widened to `object` so the isinstance guards below are live code
-        # rather than statements mypy proves unreachable from the annotations.
-        # They are not redundant: declarations also arrive from config files and
-        # test fixtures, where nothing has type-checked them.
         declared_lag: object = self.availability_lag
         if not isinstance(declared_lag, dt.timedelta):
             msg = (
@@ -234,13 +266,29 @@ class FeatureSpec:
                 f"table name; pass frozenset({{{declared_tables!r}}})."
             )
             raise FeatureSpecError(msg)
-        tables = frozenset(self.source_tables)
+        try:
+            tables = frozenset(self.source_tables)
+        except TypeError as exc:
+            msg = (
+                f"feature {self.name!r} declares source_tables {declared_tables!r}, "
+                f"which is not a collection of table names ({exc})."
+            )
+            raise FeatureSpecError(msg) from exc
         if not tables:
             msg = (
                 f"feature {self.name!r} declares no source_tables. A feature "
                 f"that reads nothing has no availability lag to enforce and "
                 f"nothing to be point-in-time about; name the fact tables it "
                 f"reads."
+            )
+            raise FeatureSpecError(msg)
+        untyped = sorted((table for table in tables if not isinstance(table, str)), key=repr)
+        if untyped:
+            msg = (
+                f"feature {self.name!r} declares source table entry/entries "
+                f"{', '.join(repr(table) for table in untyped)} that are not "
+                f"strings. A source table is named as PostgreSQL holds it, so "
+                f"the declaration is text."
             )
             raise FeatureSpecError(msg)
         bad = sorted(table for table in tables if not _TABLE_PATTERN.fullmatch(table))
@@ -276,7 +324,15 @@ class FeatureSpec:
             inclusive, matching :func:`backend.db.as_of`.
 
         Raises:
-            FeatureComputeError: if ``compute_date`` is a ``datetime``.
+            FeatureComputeError: if ``compute_date`` is a ``datetime``, or if
+                subtracting the lag from it falls before ``datetime.min``. The
+                second is unreachable for any date this platform trades on
+                (:data:`MAX_AVAILABILITY_LAG` is ten years and the earliest
+                usable price history is centuries later), but it is a
+                :class:`datetime` domain edge rather than a logical
+                impossibility, and it is named here so it arrives carrying the
+                feature, the date and the lag rather than as a bare
+                ``OverflowError`` from inside the arithmetic.
 
         Example:
             >>> spec = FeatureSpec(
@@ -289,4 +345,15 @@ class FeatureSpec:
             >>> spec.knowledge_cutoff(dt.date(2026, 3, 1)).isoformat()
             '2026-01-15T00:00:00+00:00'
         """
-        return compute_instant(compute_date) - self.availability_lag
+        instant = compute_instant(compute_date)
+        try:
+            return instant - self.availability_lag
+        except OverflowError as exc:
+            msg = (
+                f"feature {self.name!r} declares an availability lag of "
+                f"{self.availability_lag}, and subtracting it from "
+                f"{instant.isoformat()} (compute date {compute_date.isoformat()}) "
+                f"falls before the earliest representable instant "
+                f"{_EARLIEST_INSTANT.isoformat()}. Compute for a later date."
+            )
+            raise FeatureComputeError(msg) from exc

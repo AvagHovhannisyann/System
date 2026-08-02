@@ -29,9 +29,20 @@ either — :mod:`backend.db.engine` is banned from import outside ``backend/db``
 by the project's ruff configuration (D-011 layer 3). Below that, the Core-level
 guard in :mod:`backend.db._guard` is **default-deny**: a statement that is not
 the as-of rewrite raises at the cursor boundary rather than executing
-unversioned. So a computation cannot see fresher data by writing cleverer SQL;
-it would have to acquire a differently-pinned session, and the API never gives
-it the means.
+unversioned. So a computation cannot see fresher data by writing cleverer SQL
+against the session it was given.
+
+**What layer 3 does not cover, stated plainly.** :func:`backend.db.as_of` is
+part of ``backend.db``'s public surface — it has to be, since every read path in
+the platform goes through it — and :func:`backend.features.registry.feature`
+returns the decorated function unchanged, so a factor module holds a direct
+reference to its own computation. A computation that *ignores* the session it
+was handed and opens its own can therefore read at whatever instant that call
+is given, subject only to the as-of layer's own rules (tz-aware UTC, not in the
+future). Nothing in this package can prevent that, and claiming otherwise would
+misdescribe the control: what is enforced here is that the sanctioned path
+never *offers* a fresher instant, and a factor that opens its own session is a
+review finding, not something the framework can catch.
 
 What this module does *not* do is guess a feature's value. The registry's
 extension point is an async callable; the baseline factors that implement those
