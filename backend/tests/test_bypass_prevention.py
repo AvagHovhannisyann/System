@@ -229,13 +229,21 @@ def _docstring_constants(tree: ast.Module) -> frozenset[int]:
     return frozenset(docstrings)
 
 
-def _private_engine_references(source: str) -> list[str]:
+def _private_engine_references(source: str, *, check_string_literals: bool = True) -> list[str]:
     """Return every way ``source`` reaches the private engine module, in code.
 
     Covers the three routes that actually grant a handle — ``import x``,
     ``from x import y``, and a string literal fed to a dynamic importer — and
     deliberately excludes docstrings and comments, which are prose *about* the
     ban rather than a use of it.
+
+    ``check_string_literals`` is switched off for test modules. A test that
+    asserts *nobody imports the engine* has to name the engine as data, and
+    ``backend/tests/features/test_compute_lag.py`` does exactly that: it walks
+    the AST of ``backend/features/compute.py`` looking for this module name. The
+    literal is the assertion, not a use. The import routes above are still
+    checked in tests — those are what actually grant a handle, and which tests
+    may take one is governed by the allowlist below.
     """
     tree = ast.parse(source)
     docstrings = _docstring_constants(tree)
@@ -258,7 +266,8 @@ def _private_engine_references(source: str) -> list[str]:
                     if alias.name == _BANNED_MODULE.rsplit(".", 1)[1]
                 ]
         elif (
-            isinstance(node, ast.Constant)
+            check_string_literals
+            and isinstance(node, ast.Constant)
             and isinstance(node.value, str)
             and id(node) not in docstrings
             and _BANNED_MODULE in node.value
@@ -288,7 +297,8 @@ def test_no_source_outside_db_layer_imports_engine_internals() -> None:
             continue
         if relative.as_posix() in _SANCTIONED_PRIVATE_ENGINE_USERS:
             continue
-        found = _private_engine_references(path.read_text())
+        is_test = relative.parts[:2] == ("backend", "tests")
+        found = _private_engine_references(path.read_text(), check_string_literals=not is_test)
         if found:
             offenders[relative.as_posix()] = found
     assert offenders == {}
@@ -310,6 +320,21 @@ def test_the_source_scan_catches_every_route_to_the_private_engine() -> None:
     assert not _private_engine_references(f'"""Prose naming {_BANNED_MODULE} in a docstring."""')
     assert not _private_engine_references(f"# a comment naming {_BANNED_MODULE}\nx = 1")
     assert not _private_engine_references("from backend.db import as_of, ingest_writer_session")
+
+
+def test_test_modules_may_name_the_engine_as_data_but_still_may_not_import_it() -> None:
+    """The literal exemption for tests is exactly that — literals, not imports.
+
+    A test asserting nobody imports the private engine must name it to make the
+    assertion. Exempting the *import* routes too would hand every test file a
+    silent hole, so they stay checked and the allowlist keeps governing them.
+    """
+    literal = f'x = "{_BANNED_MODULE}"'
+    assert _private_engine_references(literal)
+    assert not _private_engine_references(literal, check_string_literals=False)
+
+    assert _private_engine_references(f"import {_BANNED_MODULE}", check_string_literals=False)
+    assert _private_engine_references(_BANNED_FROM_IMPORT, check_string_literals=False)
 
 
 def test_sanctioned_private_engine_allowlist_has_no_stale_entries() -> None:

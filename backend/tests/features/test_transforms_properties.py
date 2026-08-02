@@ -673,7 +673,14 @@ class TestMissingValuePolicy:
         # once the securities are permuted, so the mean and the group totals can
         # differ in the last ulp. That is a fact about summation, not about the
         # transforms treating the caller's order as meaningful.
-        scale = _scale(date.values)
+        #
+        # The tolerance is taken from each *output's* own magnitude, not the
+        # input's — the z-score is dimensionless while the two residuals are in
+        # the feature's units, so one shared scale would be wrong for two of the
+        # three. A single entry can also sit almost exactly at the value the
+        # transform removes (the name at the cross-sectional mean, the name on
+        # the fitted line), leaving a residual that is nothing but rounding; that
+        # entry has no meaningful relative error, only an absolute one.
         slack = 64.0 * EPS * _conditioning(date.values) * max(date.size, 1)
         for baseline, permuted in (
             (cross_sectional_zscore(date.values), cross_sectional_zscore(shuffled.values)),
@@ -690,8 +697,9 @@ class TestMissingValuePolicy:
             assert np.array_equal(np.isnan(reordered), np.isnan(permuted))
             present = ~np.isnan(reordered)
             if present.any():
+                output_scale = max(float(np.max(np.abs(reordered[present]))), 1e-300)
                 assert reordered[present] == pytest.approx(
-                    permuted[present], rel=slack, abs=slack * max(scale, 1e-300)
+                    permuted[present], rel=slack, abs=slack * output_scale
                 )
 
 

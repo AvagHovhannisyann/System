@@ -420,3 +420,33 @@ def test_a_later_compute_date_never_yields_an_older_cutoff(earlier: dt.date, gap
 def test_the_cap_constant_is_the_directive_number() -> None:
     """Directive §5 Phase 5: thirty features total, LLM features from Phase 7 included."""
     assert MAX_FEATURES == 30
+
+
+def test_the_availability_lag_moves_the_cutoff_backwards_and_never_forwards() -> None:
+    """Pin the *sign*. A flipped operator here is a silent 2x-lag lookahead.
+
+    Mid-build this method briefly read ``instant + self.availability_lag``
+    while its own docstring, error message and doctest all said minus. Every
+    unit test still passed, because they compared the method against the same
+    arithmetic the method used. What caught it was a factor suite asserting the
+    cutoff against an *independently stated* expected instant.
+
+    So this asserts the direction against a literal, not against a recomputation
+    of the formula: for any positive lag the cutoff is strictly earlier than the
+    compute instant, and a longer lag is never later than a shorter one. A sign
+    flip fails on the first assertion; a lag silently coerced to zero fails on
+    the second.
+    """
+    compute_date = dt.date(2026, 6, 15)
+    instant = compute_instant(compute_date)
+
+    zero = make_spec(availability_lag=dt.timedelta(0)).knowledge_cutoff(compute_date)
+    assert zero == dt.datetime(2026, 6, 15, tzinfo=dt.UTC)
+
+    week = make_spec(availability_lag=dt.timedelta(days=7)).knowledge_cutoff(compute_date)
+    assert week == dt.datetime(2026, 6, 8, tzinfo=dt.UTC)
+    assert week < instant
+
+    quarter = make_spec(availability_lag=dt.timedelta(days=90)).knowledge_cutoff(compute_date)
+    assert quarter == dt.datetime(2026, 3, 17, tzinfo=dt.UTC)
+    assert quarter < week < zero

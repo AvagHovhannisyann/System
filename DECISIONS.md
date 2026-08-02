@@ -642,3 +642,46 @@ A name failing three screens is not counted three times, so `sum(removed) + memb
 candidates` holds exactly. This is why `FILTER_ORDER` is part of the criteria hash —
 reordering the screens does not change *who* is in the universe but does change the
 waterfall, and an artefact whose numbers move without a hash change is unreproducible (I2).
+
+## D-027 — Phase 5 factor lags: zero for prices, a 7-day margin for fundamentals (2026-08-02)
+
+**Price factors (momentum 12-1, short-term reversal, low volatility) declare a lag of
+zero.** A daily close is knowable *at* that close — 16:00 ET, hours before the midnight
+UTC that opens the next date. There is no filing and no publication step to wait for.
+
+A defensive margin here would be worse than useless, for a reason worth stating: D-011
+already makes the connector stamp `knowledge_time` honestly and the as-of session filter
+on it. A lag *on top* would discard bars that genuinely were available, and if a vendor
+file lands late an honest connector stamps it later, the bar goes invisible, and the
+window shortens by itself. The margin would be double-counting a control that already
+exists.
+
+The residual risk is therefore **detected rather than absorbed**: a connector that reused
+`valid_from` (`D 00:00Z`, the trading day's *open*) as its knowledge time would make the
+compute date's own bar visible. `load_adjusted_closes` raises
+`PriceTemporalIntegrityError` on any visible bar dated at or after the compute date. A
+one-day lag would have hidden that defect while leaving it in the store for every other
+consumer to trip over.
+
+**Fundamentals factors (book-to-price, earnings yield, gross profitability, ROIC,
+accruals, asset growth) declare 7 days**, as a margin on top of the store's
+`knowledge_time`, sized from three uncertainties in the P3.5 connector that has not been
+written: a date-only vendor `datekey` resolved to the next trading day (≤4 days across a
+holiday weekend), filing date versus acceptance instant (1 day — `EdgarFiling` records a
+real accession whose filing date *precedes* acceptance in UTC, which is the lookahead
+direction), and vendor delivery after filing (2 days, **labelled a guess**). Revisit when
+P3.5 lands and the real distribution is measurable.
+
+**Known cost, accepted knowingly.** `FeatureSpec` carries one lag per feature, so
+book-to-price applies its 7 days to the *price* leg too — B/P on `D` uses the close from
+`D−7d`. That is signal loss, not lookahead, and it is the safe direction. A per-source lag
+is not expressible in the wave-1 schema; changing the schema for it is backlog, not now.
+
+**Standing lesson, from a defect that lived for minutes.** Mid-build `knowledge_cutoff`
+read `instant + availability_lag` while its docstring, error message and doctest all said
+minus — a lookahead of twice the lag. Its own unit tests passed, because they compared the
+method against a recomputation of the same formula. What caught it was a *different*
+suite asserting the cutoff against an independently stated expected instant. A test that
+recomputes the formula it is checking cannot see a sign error in that formula.
+`test_the_availability_lag_moves_the_cutoff_backwards_and_never_forwards` now pins the
+direction against literals for that reason.
