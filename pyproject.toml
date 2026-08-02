@@ -125,12 +125,77 @@ warn_required_dynamic_aliases = true
 testpaths = ["backend/tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# Coverage stays opt-in per invocation (`--cov=backend`) rather than living in
+# addopts: a floor evaluated over whatever subset of the suite someone happened
+# to run is noise, and the whole suite only runs in CI. The floor itself lives
+# in [tool.coverage.report].fail_under below.
 addopts = "-q"
 
+# ============================================================================
+# CC.6 — the coverage ratchet.  DIRECTIVE.md section 8: ">= 85% backend".
+#
+# WHAT THIS GATE PROVES
+#   That at least 85% of the shipped backend's statements *and branches* were
+#   executed while the suite ran. Nothing else.
+#
+# WHAT THIS GATE DOES NOT PROVE  (DIRECTIVE.md section 2, I6 — test honesty)
+#   - Not that anything was asserted. A test that imports a module and asserts
+#     nothing raises this number and detects no defect. Coverage records
+#     execution; only an assertion can fail.
+#   - Not that the assertions are about outcomes. Asserting that a call
+#     returned *something* still covers every line that call touched.
+#   - Not that the uncovered remainder is unimportant. This is a ratio, and
+#     the cheapest way to lift a ratio is to test easy code — so the residue
+#     drifts towards exactly the error paths that matter. The 15% that this
+#     floor tolerates is not a random 15%.
+#   - Not that the figure is comparable across commits. It moves when the
+#     denominator moves: deleting untested code raises it, and so does
+#     excluding an awkward file (see the omit list, which is therefore pinned
+#     by backend/tests/test_coverage_ratchet.py).
+#   The properties this project actually depends on — I1 temporal integrity,
+#   the append-only triggers, "no alpha in pure noise" — are asserted
+#   directly, and not one of them would be caught by this gate. Read a pass
+#   as the absence of one specific failure, never as evidence of test quality.
+#
+# HOW THE FLOOR MOVES
+#   Up, by hand, on purpose. `fail_under` is a committed constant and is
+#   deliberately never derived from the last run: a floor that tracks the
+#   current number ratifies whatever a lucky run produced and then punishes
+#   every commit after it, which is the opposite of a ratchet. The same number
+#   is pinned in backend/tests/test_coverage_ratchet.py, so changing it is a
+#   deliberate two-file edit and lowering it quietly is not available.
+# ============================================================================
 [tool.coverage.run]
 source = ["backend"]
+# Branch coverage, not lines alone: an `if` whose false arm never runs is
+# 100% line-covered and untested. Turning this off would silently soften the
+# floor without changing the number beside it.
 branch = true
-omit = ["backend/db/migrations/*"]
+# EXCLUSIONS — two, each justified by what the code *is*, never by how
+# awkward it is to test. Pinned by backend/tests/test_coverage_ratchet.py, so
+# a third entry is a deliberate two-file edit rather than a quiet carve-out.
+omit = [
+    # Alembic revisions: append-only historical artifacts run once per
+    # environment by `alembic upgrade`, not called by the application, with
+    # `downgrade()` arms that by policy never run. What they actually do
+    # (hypertables, append-only triggers, indices) is asserted against a live
+    # TimescaleDB in backend/tests/integration/ — a stronger check than
+    # counting their statements. Left in, every new revision would also
+    # dilute the ratio for the code the floor is meant to be about.
+    "backend/db/migrations/*",
+    # The test package itself. Test modules execute end to end by
+    # construction, so leaving them in the denominator pads the total with
+    # rows that are ~100% covered whatever the shipped code does. Removing
+    # them *lowers* the measured number and points the floor at the code
+    # section 8 is asking about; it is a tightening, not a carve-out.
+    "backend/tests/*",
+]
 
 [tool.coverage.report]
 show_missing = true
+# The committed floor. Read the ratchet note above before changing it.
+fail_under = 85
+# coverage compares round(total, precision) < fail_under. At the default
+# precision of 0, a real 84.6% rounds to 85 and clears an 85 floor. Two
+# decimals makes the floor mean the number written beside it.
+precision = 2

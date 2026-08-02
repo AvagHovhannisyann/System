@@ -77,14 +77,39 @@ export default defineConfig({
       exclude: ["**/*.d.ts"],
 
       /*
+       * CC.6 — the frontend half of the coverage ratchet.
+       *
        * DIRECTIVE.md section 8's frontend bar, applied to all four metrics so
        * the gate cannot be cleared by covering statements while leaving
-       * branches — the failure paths — untested. The suite currently measures
-       * comfortably above this; the gate is set at the directive's stated
-       * requirement rather than at today's figure so that CC.6 owns the
-       * ratchet decision in one place.
+       * branches — the failure paths — untested.
+       *
+       * WHAT THIS GATE DOES NOT PROVE. That the covered lines ran, and no
+       * more. It is satisfied by rendering a component and asserting nothing,
+       * and it is satisfied faster by deleting a hard file from `include`
+       * than by testing it — which is why `include` above carves out nothing
+       * and why backend/tests/test_coverage_ratchet.py pins both lists.
+       *
+       * The denominator is also small enough that the percentage is not yet a
+       * quality signal in its own right: at the time of writing the whole
+       * first-party surface is 57 statements — one route (the Overview page),
+       * the shell, and four UI primitives — measuring 85.96% statements /
+       * 93.47% branches / 83.33% functions / 84.90% lines. The gate is still
+       * worth having, because it is at the margin that it bites: adding an
+       * untested page of any real size drops the ratio straight through 70%.
+       * Read a pass as "no page was added without tests", not as "the
+       * frontend is tested".
+       *
+       * HOW THE FLOOR MOVES. Up, by hand. It stays at the directive's 70
+       * rather than at today's 85.96 on purpose — a floor pinned to the
+       * current number ratifies whatever the last run happened to reach and
+       * then punishes every commit after it. `autoUpdate` is the Vitest
+       * setting that would do exactly that, so it is set to false explicitly
+       * rather than left to its default. The same 70 is pinned in
+       * backend/tests/test_coverage_ratchet.py, so a change here is a
+       * deliberate two-file edit.
        */
       thresholds: {
+        autoUpdate: false,
         statements: 70,
         branches: 70,
         functions: 70,

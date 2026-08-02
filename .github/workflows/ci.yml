@@ -26,7 +26,15 @@ jobs:
         run: uv run python scripts/check_no_fabrication.py
       - name: Typecheck (strict)
         run: uv run mypy backend
-      - name: Tests (xfails forced to run)
+      # CC.6 ratchet, backend half. `--cov=backend` is what makes pytest-cov
+      # compute a total at all; the committed floor in
+      # [tool.coverage.report].fail_under of pyproject.toml is then applied to
+      # it and fails this step below the floor. The number lives in exactly one
+      # place so it cannot drift between here and the config. Note the two ways
+      # to disable this while leaving the config looking correct — dropping
+      # --cov, or adding --no-cov / a lower --cov-fail-under here — which is
+      # what backend/tests/test_coverage_ratchet.py asserts against.
+      - name: Tests + coverage floor (xfails forced to run)
         run: uv run pytest --runxfail --cov=backend --cov-report=term --junitxml=/tmp/junit.xml
       - name: Test-honesty guard (I6 — a skipped test counts as a failure)
         run: |
@@ -60,6 +68,11 @@ jobs:
         run: npx tsc --noEmit
       - name: Build
         run: npm run build
+      # CC.6 ratchet, frontend half. `test:ci` runs vitest with --coverage, and
+      # the committed thresholds in vitest.config.mts fail the run below them.
+      # Drop --coverage from that script and the thresholds are never evaluated
+      # while still reading as configured, so
+      # backend/tests/test_coverage_ratchet.py asserts on the script text too.
       - name: Unit/component tests + coverage (fails below §8's 70%)
         run: npm run test:ci
       - name: Test-honesty guard (I6 — a skipped test counts as a failure)
