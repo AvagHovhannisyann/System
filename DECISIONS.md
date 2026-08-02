@@ -728,3 +728,38 @@ Two independent mechanisms, each with its own counterexample: re-standardizing r
 (`twice == once / σ_once`, with **ranks unchanged**, which is why it is easy to miss), and
 the two projections do not commute — beta neutralization puts a sector bet back that sector
 demeaning had removed.
+
+## D-029 — Factor premia expectations are pre-registered, signed, and hashed (2026-08-02)
+
+Three judgement calls in the P5.4 harness, each chosen against a plausible alternative.
+
+**Expectations are written down before the data exists, and hashed into the artefact
+stamp.** Each of the nine factors carries a sign, a magnitude range, a cited source, the
+source's own published estimate with the arithmetic to an annualized fraction, the
+construction the range assumes, and the caveats a reviewer needs — HML's dead 2007-2020
+decade, accruals' post-2003 decay, low volatility being an *alpha* rather than a raw
+return, short-term reversal's gross-to-net gap, and the equal- versus value-weighted factor
+of ~2.5 on asset growth. `expectations_config()` feeds `canonical_config_hash`, so editing
+a range, a citation, or a caveat changes the `config_hash` of every report produced
+afterwards. Tuning the expectation to the result is not forbidden by exhortation; it is
+*visible*, which is the only enforcement that survives contact with a disappointing
+backtest.
+
+**Ranges are signed intervals, not a magnitude plus a direction flag.** Accruals is
+`−0.12 … −0.02`, not `0.02 … 0.12` with `sign = negative`. Under the flag encoding, a
+premium of the *wrong* sign but plausible size can satisfy the magnitude test and fail only
+the sign test — two independent checks over one fact, and a reader who glances at
+"magnitude: within range" is misled. Under signed intervals a wrong-signed premium is
+simply not in the interval, and cannot be.
+
+**Too little data is a special case of no data, and significance is evaluated before
+sign.** A short sample raises `InsufficientHistoryError` rather than emitting a weak
+verdict, and the verdict logic asks "is there a premium at all" before "does it point the
+right way". The alternative — reporting `SIGN_CONTRADICTS` on a statistically
+indistinguishable-from-zero estimate — would let noise masquerade as a refutation of the
+literature, which is the most expensive possible false positive for this project: it is the
+finding a researcher *wants*, and therefore the one least likely to be audited.
+
+**Consequence today.** No code path in this repository can build a non-empty return panel,
+so the only reachable outcome of running the harness is `FactorReturnsUnavailableError`.
+No premia table exists and none was fabricated.
