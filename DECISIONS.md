@@ -1313,3 +1313,52 @@ operand rather than the totals being differenced (float resolution); the borrow-
 cancellation likewise; D-027's sign inversion surviving unit tests that recomputed the
 formula they were checking; and now an invariance asserted over a domain wider than the one
 where it holds. In every case the arithmetic was fine and the *claim* was too strong.
+
+## D-042 — The delta baseline is a query anchored to knowledge time, and "no comparison" carries no number (P7.4, 2026-08-03)
+
+**The anchor is the current document's own `knowledge_time`, and nothing can point it
+elsewhere.** `KnowledgeAnchor.of(current)` is the only constructor used in the package, and
+no public function takes an `as_of`, `session`, `instant`, `now`, `clock` or
+`knowledge_time` parameter — asserted from the AST across all five modules *and* through
+`inspect.signature`. `resolve.py` opens `as_of(anchor.instant)` and issues its select with
+**no `knowledge_time` predicate of its own**: the bound is the session's (D-011), and a
+second, weaker filter would quietly win.
+
+**Three independent barriers stop a later restatement becoming the baseline**, and the
+non-vacuity of the test is what makes that claim worth anything: the same fixture asserts
+`store.visible_at(now())` returns *only* the restated version, so the restatement really is
+what a query answered today would pick. (1) The knowledge-time bound. (2) `select_baseline`
+**re-derives** `knowledge_time <= anchor` from the rows it was handed and **raises** rather
+than skipping — the same discipline as `PriceTemporalIntegrityError`, proved against a
+store double whose as-of layer is deliberately broken. (3) An event-time barrier refusing a
+candidate accepted at or after the current document, which is the only one that fires when a
+header correction pushes a filing's knowledge time a fortnight past its acceptance.
+
+The runner also re-checks pair direction **before** the model call, because a backwards pair
+returns a well-formed answer with every sign inverted — the one failure schema validation
+cannot see.
+
+**Three outcome types, not three values of one.** `DeltaMeasured` (an all-zero output is a
+*measurement*), `DeltaRejected` (schema failure — no `output` attribute at all), and
+`NoComparisonPossible`, which carries **no number of any kind**: no field annotated
+`int`/`float`/`complex`, no numeric attribute, no `__float__`/`__int__`/`__index__`, so
+`float(record)` raises `TypeError`. This is D-030's retraction shape and D-031's
+NaN-versus-zero shape applied to extraction: a thing that is not a measurement must not be
+renderable as one.
+
+Its two reasons stay separate for the same reason: `NO_PRIOR_DOCUMENT` is a fact about the
+issuer, `PRIOR_TEXT_UNAVAILABLE` is a fact about this platform. Merging them would report an
+ingestion gap as a property of a company, and **the un-fetched population is not a random
+sample**.
+
+**A third category is deliberately not a value at all.** `qa_evasiveness_shift` raises
+`BaselineSourceUnavailableError` because its source (P3.6 transcripts) does not exist. An
+absent baseline is an observation; an unbuilt connector is a blocker, and **a blocker stored
+as data stops being visible**.
+
+**The anonymization floor's limit is measured, not claimed away.** `edgar_filing` stores one
+filer name and one CIK and no former conformed names, so a co-filer the row does not carry
+is not masked by the floor alone. Rather than assert the absence of leaks and stop, a test
+asserts that a specific known residue (`"DEERFIELD PARTNERS, L.P."`) *survives* — so any
+change in that residue has to be seen rather than discovered later. Caller-supplied
+declarations are **unioned** with the floor, never substituted for it.
