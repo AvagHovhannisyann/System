@@ -193,9 +193,9 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 |---|---|---|---|---|
 | P11.1 | IBKR paper adapter via `ib_insync`: **paper endpoint hard-coded** (port 7497/paper gateway only; no live config path — I-check test asserts no such flag exists in codebase), needs B2 creds | G10, B2 | L | BLOCKED(B2) |
 | P11.2 | OMS: order lifecycle, idempotency keys, persistence | P11.1 | L | DONE (2026-08-02) — 195 tests, 56/56 mutations; paper-only structural, see D-033. Integration (25 tests) unrun: no Docker |
-| P11.3 | Reconciliation each cycle: positions/cash vs broker; mismatch ⇒ halt + alert | P11.2 | L | TODO |
+| P11.3 | Reconciliation each cycle: positions/cash vs broker; mismatch ⇒ halt + alert | P11.2 | L | DONE (2026-08-02) — reconciliation, 4 asymmetric mismatch kinds, see D-037 |
 | P11.4 | VWAP/TWAP slicing | P11.2 | M | TODO |
-| P11.5 | Kill switch: drawdown breach, stale data, reconciliation mismatch, manual trigger; halts within one cycle | P11.3 | L | TODO |
+| P11.5 | Kill switch: drawdown breach, stale data, reconciliation mismatch, manual trigger; halts within one cycle | P11.3 | L | DONE (2026-08-02) — kill switch, fails closed; 404 tests, 43/43 mutations |
 | P11.6 | [UI] Execution page: blotter, fills w/ slippage vs arrival, reconciliation status, cost calibration (predicted vs realized), kill-switch status + manual trigger | P11.3, P11.5 | L | TODO |
 | P11.7 | **Gate G11:** end-to-end paper cycle; injected mismatch caught; kill switch halts within one cycle | P11.5 | M | BLOCKED(B2) |
 | P11.8 | Cost-model calibration from paper fills: fit half-spread/impact parameters against realized slippage, clear the `UNCALIBRATED` flag (closes G9's deferred clause), scheduled recalibration cadence; predicted-vs-realized feeds the 6.9 UI (P11.6). **IBKR paper fills are optimistic (fill at the touch, no queue position) — they are a LOWER BOUND on slippage, never an estimate; a documented haircut is mandatory (D-013)**. Post-gate task — needs accumulated fill history | P11.7 | L | BLOCKED(B2) |
@@ -204,10 +204,10 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 
 | ID | Task | Depends | Cx | Status |
 |---|---|---|---|---|
-| P12.1 | Live-vs-expected vs CPCV distribution; auto-halt outside expected band | G11 | L | TODO |
+| P12.1 | Live-vs-expected vs CPCV distribution; auto-halt outside expected band | G11 | L | DONE (2026-08-02) — halt band; power 0.11/0.41/0.78 at 1/2/3 sigma, see D-031 |
 | P12.2 | Feature drift via PSI | G10 | M | DONE (2026-08-02) — 252 tests, 17/17 mutations; see D-031 |
 | P12.3 | Extraction-quality drift on golden set | G7 | M | TODO |
-| P12.4 | Alerting: rules, delivery, acknowledgement, halt history | P12.1 | M | TODO |
+| P12.4 | Alerting: rules, delivery, acknowledgement, halt history | P12.1 | M | DONE (2026-08-02) — alerting, acknowledgement gates resume; 370 tests, 26/26 |
 | P12.5 | [UI] Monitoring page + finalize Overview (live-vs-expected w/ CPCV bands, drawdown vs limit, health tiles, alerts, next job, spend vs cap) | P12.1–P12.4 | L | TODO |
 | P12.6 | **Gate G12:** injected drift detected; injected deviation triggers halt | P12.5 | M | TODO |
 
