@@ -183,9 +183,9 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | P10.3 | [ER] Deflated Sharpe Ratio using full trial count parsed from `TESTING_LEDGER.md` | P10.2 | L | DONE |
 | P10.4 | [ER] Probability of Backtest Overfitting | P10.2 | L | DONE |
 | P10.5 | Walk-forward analysis + buy-and-hold benchmark comparison shown with every result; CIs on every metric; UI contract: no point estimate without interval | P10.1 | L | DONE (2026-08-01, see PROGRESS) |
-| P10.6 | [ER] **Synthetic-truth harness:** injected signal of known strength recovered; pure noise reports near-zero alpha. The noise test is the critical one | P10.2–P10.5 | L | TODO |
+| P10.6 | [ER] **Synthetic-truth harness:** injected signal of known strength recovered; pure noise reports near-zero alpha. The noise test is the critical one | P10.2–P10.5 | L | DONE (2026-08-02) — synthetic-truth harness, backend/backtest/synthetic.py; see D-040 |
 | P10.7 | [UI] Backtests explorer: equity curve vs benchmark, **CPCV Sharpe histogram with point estimate marked** (the most important visualization in the app), DSR, PBO, drawdowns, turnover, cost waterfall, per-year attribution, run comparison, ledger trial count on every view | P10.5 | XL (split at start) | TODO |
-| P10.8 | **Gate G10:** synthetic-truth harness green both directions, in CI | P10.6 | S | TODO |
+| P10.8 | **Gate G10:** synthetic-truth harness green both directions, in CI | P10.6 | S | **GATE-PASSED (2026-08-02)** — noise t=-0.055 over 128 seeds, annualized -0.0055 +/- 0.100; recovery proportional (measured 2.559x/1.574x vs predicted 2.378x/1.562x); a leaky framework is caught. Verified here, no Docker needed. See D-040 |
 
 ## Phase 11 — Execution (paper only)
 

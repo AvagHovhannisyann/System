@@ -28,6 +28,14 @@ Sharpe ratios) so the three cannot silently disagree.
 :mod:`backend.backtest.ledger` is a **read-only** reader for
 ``TESTING_LEDGER.md``, which supplies the Deflated Sharpe Ratio's trial count.
 
+:mod:`backend.backtest.synthetic` (P10.6) is the **synthetic-truth harness** —
+the regression instrument for everything above. It generates seeded synthetic
+markets with an injected signal of known strength (and a pure-noise mode), drives
+the real engine over them, and reports what these statistics concluded. Re-run it
+after any change to this package: gate G10 depends on it, and a validation stack
+that has quietly stopped detecting its own failures looks exactly like one that
+works.
+
 The backtest engine itself is P10.1 and does not live here yet.
 
 Standing contract for every function in this package: the returns you pass in
@@ -75,12 +83,37 @@ from backend.backtest.pbo import (
     PerformanceFunction,
     probability_of_backtest_overfitting,
 )
+from backend.backtest.synthetic import (
+    SYNTHETIC_DATA_VERSION_PREFIX,
+    SYNTHETIC_DISCLOSURE,
+    ZERO_COST_PARAMS,
+    ConfigurationSweep,
+    CostMode,
+    SharpeSweep,
+    StrategyCandidate,
+    SyntheticDataError,
+    SyntheticMarket,
+    SyntheticRun,
+    SyntheticSpec,
+    build_synthetic_market,
+    disjoint_asset_blocks,
+    format_report,
+    require_synthetic_source,
+    run_synthetic_backtest,
+    sweep_configurations,
+    sweep_seeds,
+)
 
 __all__ = [
     "EULER_MASCHERONI",
+    "SYNTHETIC_DATA_VERSION_PREFIX",
+    "SYNTHETIC_DISCLOSURE",
+    "ZERO_COST_PARAMS",
     "CPCVSplit",
     "CPCVSplits",
     "CombinatorialPurgedCV",
+    "ConfigurationSweep",
+    "CostMode",
     "DeflatedSharpeResult",
     "EmptyTrainingSetError",
     "LedgerFormatError",
@@ -88,20 +121,33 @@ __all__ = [
     "PBOResult",
     "PathDistribution",
     "PerformanceFunction",
+    "SharpeSweep",
+    "StrategyCandidate",
+    "SyntheticDataError",
+    "SyntheticMarket",
+    "SyntheticRun",
+    "SyntheticSpec",
     "TrialLedger",
     "as_float_array",
     "average_ranks",
+    "build_synthetic_market",
     "deflated_sharpe_ratio",
     "deflated_sharpe_ratio_from_returns",
     "deflated_sharpe_ratio_from_trials",
+    "disjoint_asset_blocks",
     "expected_maximum_sharpe_ratio",
+    "format_report",
     "kurtosis",
     "path_sharpe_ratios",
     "probabilistic_sharpe_ratio",
     "probability_of_backtest_overfitting",
     "read_testing_ledger",
+    "require_synthetic_source",
+    "run_synthetic_backtest",
     "sharpe_ratio",
     "skewness",
     "standard_normal_cdf",
     "standard_normal_ppf",
+    "sweep_configurations",
+    "sweep_seeds",
 ]

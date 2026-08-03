@@ -1240,3 +1240,49 @@ computed once, never re-forecast, because re-forecasting means observing the ses
 this package observes nothing. It is a participation *shape*, not a benchmark-tracking
 algorithm, and saying so now prevents the claim being made later by someone reading the
 name.
+
+## D-040 — G10 passes, and the gate had to be strengthened twice before it meant anything (P10.6/P10.8, 2026-08-02)
+
+**Verdict: G10 PASSES.** No file under `backend/backtest/` needed fixing — `engine.py`,
+`cpcv.py`, `dsr.py` and `pbo.py` were mutated for the study and restored byte-identically.
+A gate that passes without a source fix is a different fact from one that needed one, and
+this is the former.
+
+**The strength is stated in units and recovery is proportional, not merely present.** The
+injected `tau` is the cross-sectional standard deviation of true expected return in
+bps/period. Because the estimator's correlation `rho` and the return variance both move with
+`tau`, the *predicted* step sizes between rungs are 2.378x and 1.562x — not 2x and 2x.
+Measured: **2.559x and 1.574x**. A framework with a scale error recovers "some" signal at
+every rung and passes a presence test while failing this one. The closed form is re-derived
+inside the test by 400,000-draw Monte Carlo importing nothing from `backend.backtest`, so
+the prediction cannot be the framework marking its own homework.
+
+**On pure noise, over 128 seeds: t = −0.055, annualized −0.0055 ± 0.100** — 45x and 64x
+headroom against the thresholds. And the reason no claim is made about a single seed is
+itself asserted: **37.5% of individual noise seeds show |annualized Sharpe| > 1.0, ranging
+−3.26 to +2.32**.
+
+**Gross must be tested, and I4 is why that is not a contradiction.** Net of shipped
+uncalibrated costs, trading noise reliably *loses* money (t = −5.08), which means costs mask
+a leak. Measured at leak fraction 0.10: **the gross criteria catch the defect (t = +3.16,
+annualized +0.415) while the net figures do not (t = +0.70, annualized +0.103)**. A
+net-only gate would have missed it. So the zero-cost path exists as a **labelled
+diagnostic** whose `calibration_basis` says so, no gross figure is ever reported as a
+result, and I4's "never report gross" survives intact.
+
+**The finding that matters most: the first version of this gate did not catch dropped
+purging.** Mutating CPCV's `_purge_and_embargo` to return the unpurged mask produced **zero
+gate failures**. With point-in-time labels, purging removes only the observations straddling
+a test block's edge, so the reported path Sharpe ratios barely move — **an output-only gate
+accepts a CPCV with the purge deleted**, and the leak it admits grows with the label
+horizon. Fixed by asserting *structurally* that the splits the gate itself relies on
+withhold both neighbours of every test row. The general lesson: a validation gate that only
+inspects outputs cannot detect a validation control being removed, because the control's
+whole job is to change outputs by a small amount.
+
+**Two of the agent's own assertions were replaced rather than defended**, both badly derived
+rather than failures of the framework: a `1e-4` bound on active return dominated by the
+synthetic index's own draw, and a per-seed floor on signal CPCV paths. The oracle ceiling
+moved from a bare inequality to a 2.5-standard-error non-exceedance, because at `rho =
+0.967` honest recovery legitimately approaches the ceiling — and the same criterion now
+serves the noise direction, where the ceiling is exactly zero.
