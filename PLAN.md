@@ -209,7 +209,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | P12.3 | Extraction-quality drift on golden set | G7 | M | TODO |
 | P12.4 | Alerting: rules, delivery, acknowledgement, halt history | P12.1 | M | DONE (2026-08-02) — alerting, acknowledgement gates resume; 370 tests, 26/26 |
 | P12.5 | [UI] Monitoring page + finalize Overview (live-vs-expected w/ CPCV bands, drawdown vs limit, health tiles, alerts, next job, spend vs cap) | P12.1–P12.4 | L | TODO |
-| P12.6 | **Gate G12:** injected drift detected; injected deviation triggers halt | P12.5 | M | GATE PENDING (2026-08-02) — clause 1 PASSES executed (PSI 0.0056 clean vs 0.9187 at +1.0 sigma, monotone through 4 shifts). Clause 2 passes as decision+alert; its LANDING (halt row, require_not_halted refusing) is unrun here — no Docker. NOT GATE-PASSED until CI runs test_gate_g12_db.py green |
+| P12.6 | **Gate G12:** injected drift detected; injected deviation triggers halt | P12.5 | M | **GATE-PASSED (2026-08-03)** — clause 1 verified locally (PSI 0.0056 clean vs 0.9187 at +1.0 sigma, monotone across four shifts, both directions); clause 2's halt LANDING verified in CI against real Postgres, which is what the local run could not do. Does NOT establish real-drift latency: measured power 0.11/0.41/0.78 at 1/2/3 sigma, ~2.27 years to catch a 1-sigma decay at quarterly cadence. Phase 12 still incomplete: P12.3 blocked on B3, P12.5 is UI |
 
 ## Cross-cutting (CC) — slotted between phases
 
