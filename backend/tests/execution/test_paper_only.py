@@ -165,6 +165,7 @@ def test_the_package_has_modules_to_check() -> None:
         "lifecycle.py",
         "orders.py",
         "reconciliation.py",
+        "slicing.py",
         "store.py",
     }
 

@@ -47,6 +47,24 @@ and :class:`ReconciliationReplayError` cover the comparison;
 :class:`HaltStateUnavailableError` is the one worth reading twice. It exists so
 that "I could not determine whether I am halted" is a *refusal to trade* rather
 than an exception a caller might mistake for an empty result.
+
+Slicing (P11.4)
+---------------
+
+The third group belongs to :mod:`backend.execution.slicing`, and it fails in a
+fourth characteristic way: **arithmetic that is nearly right.** A schedule whose
+slices sum to three shares less than the parent, a slice of zero shares, a
+thirteen-bucket shape squeezed into a parent that cannot fill it — none of these
+raises anything by itself, and each produces a blotter that looks ordinary and a
+position that is wrong. :class:`SliceScheduleError` refuses all of them at the
+point of construction.
+
+:class:`VolumeForecastError` and its subclass :class:`ForecastLookaheadError`
+cover the input the arithmetic runs on. The subclass is separate because it is
+not a validation slip: a VWAP schedule weighted by the volume that actually
+traded on the day it trades is invariant I1 violated in its purest form, and it
+is the one mistake in this area that makes a backtest look *better* rather than
+broken.
 """
 
 from __future__ import annotations
@@ -63,6 +81,7 @@ __all__ = [
     "DuplicateOrderError",
     "ExecutionError",
     "FillAccountingError",
+    "ForecastLookaheadError",
     "HaltAlreadyClearedError",
     "HaltClearanceError",
     "HaltStateUnavailableError",
@@ -73,10 +92,12 @@ __all__ = [
     "OrderValidationError",
     "ReconciliationMismatchError",
     "ReconciliationReplayError",
+    "SliceScheduleError",
     "SnapshotValidationError",
     "SystemHaltedError",
     "TerminalOrderError",
     "TransitionChainError",
+    "VolumeForecastError",
 ]
 
 
@@ -508,6 +529,79 @@ class HaltAlreadyClearedError(ExecutionError, RuntimeError):
             f"cleared; this attempt is not the one that cleared it, and a second clearance "
             f"row would leave the log with two answers to 'who turned it back on'"
         )
+
+
+class SliceScheduleError(ExecutionError, ValueError):
+    """Raised when a slice schedule would not be a faithful division of its parent.
+
+    Every case is arithmetic that is *nearly* right, which is why each one is a
+    refusal rather than a correction:
+
+    - **The slices do not sum to the parent.** Ten slices of a 1,003-share parent
+      that total 1,000 leave three shares no order will ever trade. Nothing
+      complains at the time; reconciliation reports the residue days later as a
+      break it cannot attribute. :func:`backend.execution.slicing.apportion_shares`
+      is exact in integers, and
+      :class:`~backend.execution.slicing.SliceSchedule` re-checks the sum in its
+      constructor so the property belongs to the type rather than to the function
+      that usually builds it.
+    - **A slice is below the minimum, or the parent cannot fill the shape.** A
+      thirteen-bucket profile over a 500-share parent at one round lot per slice
+      does not exist, and truncating the profile to fit would silently substitute
+      a different volume shape for the one the caller supplied. The message names
+      the largest bucket count that would have worked.
+    - **The slice coordinates are wrong.** ``slice_index`` and ``slice_count`` are
+      part of the idempotency preimage (P11.2), so a duplicated index makes two
+      children collide on one key and a wrong count names an order nobody
+      planned.
+    - **The children disagree about which order they implement**, or the parent is
+      itself already a slice. A schedule is one decision divided over time; nested
+      slice coordinates have no representation in the order schema.
+
+    Units: every quantity in the message is in **whole shares**.
+
+    Subclasses :class:`ValueError` so ordinary caller-side validation and
+    ``pytest.raises(ValueError)`` keep working.
+    """
+
+
+class VolumeForecastError(ExecutionError, ValueError):
+    """Raised when a volume forecast is not a usable weighting.
+
+    Covers an empty or over-wide set of buckets, a weight that is not a strictly
+    positive whole number, a session that traded nothing, sessions that disagree
+    about their bucket count, a blank ``basis_detail``, a timestamp where a
+    calendar date belongs, and a basis whose ``fitted`` claim disagrees with
+    whether an observation date is present.
+
+    The blank-provenance case is the one that looks like pedantry and is not: an
+    unlabelled volume curve is indistinguishable from a measured one, and
+    :mod:`backend.execution.slicing` ships a curve that is explicitly an
+    assumption (I3). The label is what keeps a VWAP schedule from reading as
+    though it were fitted to something.
+    """
+
+
+class ForecastLookaheadError(VolumeForecastError):
+    """Raised when a volume forecast consumed a session it may not have seen (I1).
+
+    A subclass rather than a separate error, because it *is* an invalid forecast —
+    the specialisation exists because this one is not a validation slip. Directive
+    §2, I1: no fact may be used whose knowledge time is later than the query's
+    as-of. A VWAP schedule weighted by the volume that actually traded on the day
+    it trades is that violation in its purest form, and it is the mistake in this
+    area that makes a backtest look *better* rather than broken — knowing the
+    day's volume profile is knowing where the day's liquidity was.
+
+    Raised on any of three routes, so that no single check is load-bearing:
+    constructing a :class:`~backend.execution.slicing.VolumeForecast` whose
+    ``observed_through`` is on or after its ``as_of``; supplying
+    :func:`~backend.execution.slicing.observed_volume_forecast` a session dated on
+    or after the date it is forecasting; and assembling a
+    :class:`~backend.execution.slicing.SliceSchedule` whose forecast reaches its
+    own rebalance date. Equality is a violation, not a boundary case — same-day
+    realised volume is exactly the prohibited input.
+    """
 
 
 class HaltClearanceError(ExecutionError, ValueError):

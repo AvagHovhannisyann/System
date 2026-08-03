@@ -1192,3 +1192,51 @@ declare which other constraints their overrides reach, cross-referenced against 
 constraint texts by a unit test that needs no database. Its limit is stated in its own
 docstring: it proves the coupling was **noticed**, not that the probe's values satisfy the
 neighbour — only a real database can do that, via the constraint-name assertion in CI.
+
+## D-039 — Slicing: the forecast derives its own bound, and the cost model has no reason to stop (P11.4, 2026-08-02)
+
+**TWAP is implemented as the degenerate VWAP** — a uniform integer forecast through the same
+allocator. There is no second piece of TWAP arithmetic that could disagree with the VWAP
+path, which is the usual way these two drift apart. The algorithm *label* still differs,
+because a VWAP planned against a uniform forecast and a TWAP are the same numbers and not
+the same decision.
+
+**The lookahead control is that the forecast derives its own bound rather than accepting a
+claim about it.** `observed_volume_forecast` takes session observations carrying their own
+dates and computes `observed_through = max(session_date)`, refusing if any session is dated
+on or after `as_of`. **A caller cannot understate what the forecast consumed**, which is the
+failure a "please pass the correct bound" API invites. Two further gates: the value object
+refuses `observed_through >= as_of` (equality is a violation, not a boundary case), and the
+planner re-checks against the session *actually being traded*, which differs whenever a
+forecast built for one day is handed to a schedule for another.
+
+That third check is deliberately ordered **before** the `as_of` match. Checking the match
+first would make the branch unreachable — a defence that only looks like one. Two mutations
+survived the first sweep for exactly this reason: a redundant layer caught them, so a
+type-only assertion still passed. The tests now match each layer's own wording.
+
+`OBSERVED_PROFILE` is unreachable today by design — it needs intraday volume history the
+platform does not have (B1) — so every VWAP schedule this system can currently build is
+`fitted=False` and says so on the object.
+
+**The U-curve is labelled, not fitted.** One visible constant
+(`U_CURVE_EDGE_TO_MIDDLE_RATIO = 3`), cited to Wood/McInish/Ord (1985), Harris (1986),
+Admati & Pfleiderer (1988) and Jain & Joh (1988), and marked `"STYLISED ASSUMPTION, NOT
+FITTED"` in text that travels onto every schedule and cost. The real curve is asymmetric —
+the close is heavier than the open — and this one deliberately is not, because modelling the
+asymmetry means choosing a second unfitted number that would look like a measurement.
+
+**What stops infinite slicing is exogenous, and the code proves the cost model will not do
+it.** Impact is square-root in participation, so modelled cost falls monotonically in the
+slice count: total cost strictly decreases across n = 1…13, impact dollars fall exactly as
+1/√n, and **commission is invariant in n — the model has no per-order term at all**. So the
+bound cannot come from optimisation and is stated instead: a round-lot minimum slice, and a
+horizon of `390 // 30 = 13` buckets derived from the session length rather than picked.
+`ScheduleCost.summary()["omits"]` names what is missing — per-order cost, timing/volatility
+risk (Almgren-Chriss), cross-impact.
+
+**No VWAP tracking-error claim may be made, now or after P11.1.** The schedule is static:
+computed once, never re-forecast, because re-forecasting means observing the session and
+this package observes nothing. It is a participation *shape*, not a benchmark-tracking
+algorithm, and saying so now prevents the claim being made later by someone reading the
+name.

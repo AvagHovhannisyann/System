@@ -194,7 +194,7 @@ Every connector: retry w/ backoff, rate limiting, incremental sync, data-quality
 | P11.1 | IBKR paper adapter via `ib_insync`: **paper endpoint hard-coded** (port 7497/paper gateway only; no live config path — I-check test asserts no such flag exists in codebase), needs B2 creds | G10, B2 | L | BLOCKED(B2) |
 | P11.2 | OMS: order lifecycle, idempotency keys, persistence | P11.1 | L | DONE (2026-08-02) — 195 tests, 56/56 mutations; paper-only structural, see D-033. Integration (25 tests) unrun: no Docker |
 | P11.3 | Reconciliation each cycle: positions/cash vs broker; mismatch ⇒ halt + alert | P11.2 | L | DONE (2026-08-02) — reconciliation, 4 asymmetric mismatch kinds, see D-037 |
-| P11.4 | VWAP/TWAP slicing | P11.2 | M | TODO |
+| P11.4 | VWAP/TWAP slicing | P11.2 | M | DONE (2026-08-02) — 88 tests, 7/7 mutations; forecast derives its own bound, see D-039 |
 | P11.5 | Kill switch: drawdown breach, stale data, reconciliation mismatch, manual trigger; halts within one cycle | P11.3 | L | DONE (2026-08-02) — kill switch, fails closed; 404 tests, 43/43 mutations |
 | P11.6 | [UI] Execution page: blotter, fills w/ slippage vs arrival, reconciliation status, cost calibration (predicted vs realized), kill-switch status + manual trigger | P11.3, P11.5 | L | TODO |
 | P11.7 | **Gate G11:** end-to-end paper cycle; injected mismatch caught; kill switch halts within one cycle | P11.5 | M | BLOCKED(B2) |
