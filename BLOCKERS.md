@@ -247,3 +247,30 @@ that is currently overstated —
 CC.9 is now first in the current wave. Until it lands, **neither claim should be presented
 to an operator without this caveat attached** — which is the substance of what D-017 was
 protecting, and the reason a backlog item was given a deadline in the first place.
+
+## B8 — No store for document bodies — OPEN (2026-08-03)
+
+**Blocks:** any extraction that needs the *text* of a prior document — P7.4's four working
+delta tasks in production use, and P7.5/P7.8 when they arrive.
+**Found by:** the P7.4 track, while building the baseline resolver.
+
+`edgar_filing_document` stores a **manifest and a URL, never a body**. So nothing in this
+platform can hand an extraction task the text of a filing it resolved. P7.4 works around it
+honestly — the prior document's text comes from a caller-supplied `PriorTextSource`, and
+when none is available the result is `NoComparisonPossible(PRIOR_TEXT_UNAVAILABLE)`, a fact
+about *this platform* kept deliberately distinct from `NO_PRIOR_DOCUMENT`, a fact about the
+issuer. But there is no shipped implementation of that source.
+
+**Needed from the human:** a decision on whether filing bodies are stored (a new table and a
+fetch step, with the storage cost that implies) or fetched on demand at extraction time
+(cheaper, but then the text is not point-in-time and an extraction cannot be reproduced from
+the store alone — which collides with I2). This is a design decision with a reproducibility
+consequence, not a coding task, which is why it is here rather than in `BACKLOG.md`.
+
+### B1 addendum (2026-08-03) — it blocks a fifth Phase 7 deliverable
+
+Not previously recorded: **P3.6 (earnings-call transcripts) is blocked on B1, and that
+blocks `qa_evasiveness_shift`** — one of P7.4's five delta tasks. It cannot resolve a
+baseline at all, and raises `BaselineSourceUnavailableError` rather than returning a data
+value, because a blocker stored as data stops being visible (D-042). The other four delta
+tasks resolve their baselines from `edgar_filing`, which exists.
