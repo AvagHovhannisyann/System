@@ -1,6 +1,6 @@
 # HANDOVER.md — what is built, what is not, and what only you can do
 
-**Status as of 2026-08-03.** Everything buildable without a human decision is built.
+**Status as of 2026-08-03.** Everything buildable without a human decision is built. P7.4 was the last such task and it landed on 2026-08-03.
 Every remaining item is either blocked on you or is a `[UI]` page routed to Fabel.
 
 Read `DIRECTIVE.md` for the rules this was built under, `PLAN.md` for task-level status,
@@ -60,6 +60,18 @@ FINRA Rule 4560 — semi-monthly, published ~8 business days after the settlemen
 > `valid_from`, and **the obvious wrong `knowledge_time`**. A connector that substitutes one
 > for the other grants eight business days of foresight twice a month, and the resulting
 > factor looks *better* — right sign, right magnitude, better backtest.
+
+### B8 — Decide how filing *text* is stored · new, has an I2 consequence
+
+`edgar_filing_document` stores a **manifest and a URL, never a body**, so nothing in the
+platform can hand an extraction task the text of a filing it just resolved. P7.4's delta
+tasks work around it honestly (a caller-supplied text source; absent text yields
+`NoComparisonPossible(PRIOR_TEXT_UNAVAILABLE)`, kept distinct from "the issuer filed
+nothing"), but there is no shipped implementation.
+
+The choice: **store bodies** (new table, fetch step, storage cost) or **fetch on demand**
+(cheaper, but the text is then not point-in-time and an extraction cannot be reproduced from
+the store alone — which collides with I2). A design decision, not a coding task.
 
 ### Also yours, smaller
 
