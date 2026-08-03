@@ -62,7 +62,9 @@ from hypothesis import settings as hypothesis_settings
 from hypothesis import strategies as st
 
 from backend.features import _stats, transforms
+from backend.features._stats import dispersion_is_degenerate
 from backend.features.transforms import (
+    ZERO_DISPERSION_RELATIVE_TOLERANCE,
     beta_neutralize,
     cross_sectional_zscore,
     neutralize,
@@ -870,14 +872,48 @@ class TestUnitEquivariance:
     def test_z_scoring_is_invariant_under_an_affine_change_of_units(
         self, date: _CrossSection, factor: float, offset_ratio: float
     ) -> None:
+        """Affine invariance holds wherever the *rescaled* section is still measurable.
+
+        The unrestricted claim is false, and the exception is not floating-point
+        slop — it is the dispersion guard doing its job. Degeneracy is judged as
+        ``std <= tolerance * max|x|``, and a translation raises ``max|x|``
+        without changing ``std``. So an offset can carry a genuinely-dispersed
+        cross-section below the guard, and it *should*: at an offset of 1000x
+        the values' own magnitude, the surviving relative dispersion here is
+        ~2e-15, which is rounding residue. Standardizing it would amplify noise
+        into full-scale z-scores that look like a well-behaved feature — the
+        exact outcome the guard exists to prevent.
+
+        Put plainly: z-scoring is translation-invariant in exact arithmetic and
+        is not in float64, because translation destroys precision. Hypothesis
+        found this with values at 1e-06 and ``factor=0.25``.
+
+        So the comparison is restricted to positions the rescaled section can
+        still measure, and the discarded case is asserted rather than skipped —
+        a NaN there must be *explained* by degeneracy, never merely tolerated.
+        Without that second assertion this restriction would hide a transform
+        that had started returning NaN for unrelated reasons.
+        """
         baseline = cross_sectional_zscore(date.values)
         present = ~np.isnan(baseline)
         assume(bool(present.any()))
         offset = offset_ratio * _scale(date.values)
 
-        rescaled = cross_sectional_zscore(date.values * factor + offset)
+        moved = date.values * factor + offset
+        rescaled = cross_sectional_zscore(moved)
+        comparable = present & ~np.isnan(rescaled)
+
+        if not comparable.any():
+            observed = _observed(moved)
+            assert observed.size < 2 or dispersion_is_degenerate(
+                float(np.std(observed, ddof=1)),
+                scale=float(np.max(np.abs(observed))),
+                relative_tolerance=ZERO_DISPERSION_RELATIVE_TOLERANCE,
+            ), "z-scoring returned NaN for a cross-section the guard considers measurable"
+            return
+
         slack = 256.0 * EPS * _conditioning(date.values) * (1.0 + abs(offset_ratio))
-        assert rescaled[present] == pytest.approx(baseline[present], rel=slack, abs=slack)
+        assert rescaled[comparable] == pytest.approx(baseline[comparable], rel=slack, abs=slack)
 
     @given(date=_cross_sections(), factor=_FACTORS, offset_ratio=_OFFSET_RATIOS)
     @hypothesis_settings(max_examples=300, deadline=None)

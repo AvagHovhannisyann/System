@@ -1286,3 +1286,30 @@ synthetic index's own draw, and a per-seed floor on signal CPCV paths. The oracl
 moved from a bare inequality to a 2.5-standard-error non-exceedance, because at `rho =
 0.967` honest recovery legitimately approaches the ceiling — and the same criterion now
 serves the noise direction, where the ceiling is exactly zero.
+
+## D-041 — Z-scoring is translation-invariant in exact arithmetic and not in float64 (2026-08-03)
+
+Found by the P5.2 property suite on a final full run, at values of `1e-06` with
+`factor = 0.25`. The unrestricted claim "z-scoring is invariant under an affine change of
+units" is **false**, and the exception is not floating-point slop — it is the dispersion
+guard working correctly.
+
+Degeneracy is judged as `std <= tolerance * max|x|`. A **translation raises `max|x|` without
+changing `std`**, so an offset can carry a genuinely-dispersed cross-section below the
+guard. Measured: at an offset of 1000x the values' own magnitude, surviving relative
+dispersion is ~2e-15 — rounding residue. Standardizing it would amplify noise into
+full-scale z-scores that look like a well-behaved feature, which is precisely the outcome
+D-028's guard exists to prevent. **The guard is right and the property was wrong.**
+
+The property now states its true domain: it compares where the *rescaled* section is still
+measurable. That restriction would be a weakening on its own, so the discarded case is
+**asserted rather than skipped** — a NaN there must be explained by degeneracy, never merely
+tolerated. Verified non-vacuous: making `cross_sectional_zscore` return NaN unconditionally
+still fails the test, caught by that second assertion.
+
+**The general shape, which has now appeared four times in this build.** A tolerance or
+invariance stated against the wrong quantity: the cost model's strictness against the small
+operand rather than the totals being differenced (float resolution); the borrow-term
+cancellation likewise; D-027's sign inversion surviving unit tests that recomputed the
+formula they were checking; and now an invariance asserted over a domain wider than the one
+where it holds. In every case the arithmetic was fine and the *claim* was too strong.
