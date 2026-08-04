@@ -1393,34 +1393,49 @@ is also not the same as the connector being written: P3.3–P3.6 are still unbui
 D-015 requirement to **validate point-in-time correctness before trusting a feed** applies to
 CRSP exactly as it would have to a paid vendor.
 
-## D-044 — CVE-2026-69247: the security fix costs thirteen MLflow versions, and that is the right trade (2026-08-04)
+## D-044 — CVE-2026-69247: held open deliberately, because taking the fix costs 27 vulnerabilities to close 1 (2026-08-04)
 
-A new advisory landed against `cryptography` 49.0.0 (**CVE-2026-69247**, fixed in 50.0.0) and
-turned the security job red on a **docs-only commit** — the classic shape of a vulnerability
-published against a dependency that was already there.
+**This entry replaces a wrong one, and the mistake is the useful part.** A new advisory
+landed against `cryptography` 49.0.0 (**CVE-2026-69247**, fixed in 50.0.0), turning the
+security job red on a docs-only commit. `cryptography` is not incidental here — it *is* the
+I5 mechanism, encrypting every provider API key at rest — so the first instinct was to take
+the fix, and I did.
 
-**This one is not routine.** `cryptography` is not an incidental dependency: it *is* the I5
-mechanism. Fernet encrypts every provider API key at rest, with the KEK from the environment
-(CC.0, §7). A CVE here sits directly on the secret-isolation path.
+**That was wrong, and CI proved it: 1 vulnerability became 27.** `mlflow` 3.15.0 hard-pins
+`cryptography<50,>=43.0.0`, so raising the floor drags mlflow down to **3.2.0**, which
+carries **26 advisories of its own**, plus one more in a pyarrow downgraded from 25 to 21.
+The trade was measured, not estimated:
 
-**Raising the floor to `>=50` forces MLflow from 3.15.0 down to 3.2.0.** Not a resolver
-preference — genuinely unsatisfiable, and the resolver says so outright: *"because your
-project depends on cryptography>=50 and mlflow>=3.15, we can conclude that your project's
-requirements are unsatisfiable."*
+| | cryptography CVEs | mlflow CVEs | pyarrow | **total** |
+|---|---|---|---|---|
+| mlflow 3.15 + cryptography 49 | 1 | 0 | 0 | **1** |
+| mlflow 3.2 + cryptography 50 | 0 | 26 | 1 | **27** |
 
-**Decision: take the security fix.** `cryptography` protects credentials; MLflow records
-experiments. A thirteen-version downgrade in experiment tracking is a real cost and is
-recorded as one, but it is not a security cost, and the alternative is knowingly shipping a
-CVE on the path that protects secrets. `pip-audit` re-run afterwards: **no known
-vulnerabilities**.
+**Decision: stay on cryptography 49 and hold the CVE open**, with `--ignore-vuln
+CVE-2026-69247` in the security job carrying its justification and removal condition inline.
+Same pattern as D-010's npm allowlist: an exception that must explain itself and name the
+event that retires it.
 
-**The compose image tag moved with it, and a test forced that.** CC.3 pinned
-`ghcr.io/mlflow/mlflow` to the version `uv.lock` resolves the *client* to, because client and
-server share a backing-store schema and drift between them is silent.
-`test_mlflow_image_is_pinned_to_the_locked_client_version` failed the moment the lock moved —
-which is precisely why it asserts the equality rather than a literal. Tag now `v3.2.0`,
-verified to exist in the registry (HTTP 200) rather than assumed.
+**This is a risk accepted under uncertainty, not a risk judged low, and the difference
+matters.** The CVE is too new to be indexed in any public database — searches return
+nothing — so it was **not possible to determine whether it reaches Fernet** or lives in a
+part of the library this project never calls. No claim is made either way. If it later
+proves to affect Fernet specifically, this decision should be revisited immediately rather
+than treated as settled.
 
-**Revisit when MLflow ships a release compatible with `cryptography>=50`.** The floor in
-`pyproject.toml` carries a note pointing here, so a future reader bumping MLflow "helpfully"
-finds out first that doing so reopens a credential-path CVE.
+**Removal condition:** when mlflow ships a release permitting `cryptography>=50`. Version
+3.16 did not exist on 2026-08-04 (PyPI returns 404). Remove the ignore, raise the floor,
+relock, and confirm the audit is clean without exceptions.
+
+**Two process lessons, both mine.**
+
+*First: `uvx pip-audit` with no arguments audits the wrong thing.* It runs pip-audit in its
+own isolated environment, so it reports on **pip-audit's** dependencies, not the project's. It
+told me "no known vulnerabilities" while the project carried 27. CI does it correctly —
+`uv export --locked` to a requirements file, then audit that file. A verification that
+inspects the wrong target is worse than no verification, because it produces confidence.
+
+*Second: a dependency floor is not a local change.* Raising one recomputes the entire
+resolution, and the packages that move down carry their own histories. The cost of a
+security bump is not the bump; it is everything the resolver does to accommodate it, and
+that has to be measured before the change is called a fix.

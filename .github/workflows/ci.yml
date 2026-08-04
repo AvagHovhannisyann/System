@@ -127,9 +127,20 @@ jobs:
         with:
           enable-cache: true
       - name: pip-audit (locked runtime deps)
+        # --ignore-vuln CVE-2026-69247 (cryptography 49.0.0, fixed in 50.0.0).
+        # Held open deliberately, and the reasoning is in DECISIONS.md D-044.
+        # In short: mlflow 3.15.0 hard-pins "cryptography<50,>=43.0.0", so taking
+        # the fix drags mlflow down to 3.2.0, which carries 26 advisories of its
+        # own plus one in a downgraded pyarrow. Measured, not estimated: 1
+        # vulnerability against 27. The scope of this CVE could NOT be assessed -
+        # it is not yet indexed in any public database - so this is a risk
+        # ACCEPTED UNDER UNCERTAINTY, not a risk judged low.
+        # REMOVE THIS IGNORE when mlflow ships a release permitting
+        # cryptography>=50 (3.16+ did not exist as of 2026-08-04). Removing it
+        # then is the whole point of writing the condition down.
         run: |
           uv export --locked --no-dev --no-emit-project --format requirements-txt -o /tmp/requirements.txt
-          uvx pip-audit -r /tmp/requirements.txt
+          uvx pip-audit -r /tmp/requirements.txt --ignore-vuln CVE-2026-69247
       - uses: actions/setup-node@v4
         with:
           node-version: 22
