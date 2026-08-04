@@ -1,8 +1,10 @@
 """P7.1 unit tests: vocabulary, validation, defaults, and the probe (no database).
 
 What is proved here rather than in the integration suite: everything that is a
-property of the *code* — the provider vocabulary agreeing across its three
-spellings, the refusals that happen before any I/O, temperature defaulting to
+property of the *code* — the provider vocabulary agreeing across its spellings
+(the enum, the ORM, and the migration that last widened it, with the earlier
+revisions pinned to the set they shipped with), the refusals that happen before
+any I/O, temperature defaulting to
 0, and the exact wire shape of a probe request. Anything that needs a real
 PostgreSQL round trip (ciphertext at rest, versioning, audit events, the
 append-only trigger) lives in ``backend/tests/integration/test_providers_db.py``.
@@ -26,7 +28,9 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
+import backend.db.models  # noqa: F401 — populates the metadata the drift scan reads
 from backend.core.crypto import mask_secret
+from backend.db.base import Base
 from backend.db.models import PROVIDER_NAMES_SQL
 from backend.extraction.providers import (
     DEFAULT_MAX_TOKENS,
@@ -63,7 +67,7 @@ def _sql_vocabulary(sql: str) -> set[str]:
 
 
 # --------------------------------------------------------------------------
-# Vocabulary: one set of providers, spelled in three places
+# Vocabulary: one current set of providers, plus the history that produced it
 # --------------------------------------------------------------------------
 
 
@@ -78,10 +82,86 @@ def test_orm_check_vocabulary_matches_the_provider_enum() -> None:
     assert _sql_vocabulary(PROVIDER_NAMES_SQL) == {member.value for member in Provider}
 
 
-def test_migration_0009_declares_the_same_provider_vocabulary() -> None:
-    """Migration 0009's CHECK vocabulary matches the ORM's, so the schema agrees with itself."""
-    migration = importlib.import_module("backend.db.migrations.versions.0009_provider_registry")
+def test_the_latest_widening_declares_the_same_provider_vocabulary_as_the_orm() -> None:
+    """The head vocabulary revision and the ORM name exactly the same providers.
+
+    This is the assertion that used to sit on 0009, and it moved because the
+    vocabulary grew. A migration records what the schema was at its point in the
+    chain; when a provider is added, earlier revisions keep the set they shipped
+    with and a new revision widens it. Pointing this test at 0009 would have
+    forced an edit to an applied migration — making a database migrated last week
+    and one created today disagree about what 0009 did, with nothing in the chain
+    saying so.
+
+    Consequently *this* test must be repointed at the newest widening whenever a
+    provider is added. That is deliberate: it is one line, and it is the line that
+    makes the addition visible in the diff.
+    """
+    migration = importlib.import_module(
+        "backend.db.migrations.versions.0018_provider_vocabulary_groq"
+    )
     assert _sql_vocabulary(migration._PROVIDER_NAMES_SQL) == _sql_vocabulary(PROVIDER_NAMES_SQL)
+
+
+def test_the_earlier_revisions_keep_the_vocabulary_they_shipped_with() -> None:
+    """0009 and 0013 are pinned to history, so nobody 'fixes' them into agreement.
+
+    Frozen literals rather than a comparison against the enum: the whole point is
+    that these must *not* track the current set. If a future provider is added by
+    editing these revisions instead of adding a widening, this fails.
+    """
+    registry = importlib.import_module("backend.db.migrations.versions.0009_provider_registry")
+    ledger = importlib.import_module("backend.db.migrations.versions.0013_llm_spend_ledger")
+    shipped = {"anthropic", "openai"}
+    assert _sql_vocabulary(registry._PROVIDER_NAMES_SQL) == shipped
+    assert _sql_vocabulary(ledger._PROVIDER_NAMES_SQL) == shipped
+
+
+def test_the_widening_covers_every_table_that_constrains_a_provider() -> None:
+    """A provider-bearing table left out of the widening keeps the narrow CHECK.
+
+    The failure that motivates this is asymmetric and quiet: credentials would
+    save, assignments would save, and the *spend ledger* would reject the first
+    governed call with an IntegrityError — at call time, in a path that already
+    has a refusal taxonomy, where it would read like a governor decision rather
+    than a missed migration.
+    """
+    migration = importlib.import_module(
+        "backend.db.migrations.versions.0018_provider_vocabulary_groq"
+    )
+    constrained = {
+        name
+        for name, table in Base.metadata.tables.items()
+        if any(constraint.name == f"ck_{name}_provider_known" for constraint in table.constraints)
+    }
+    assert constrained, "no mapped table declares provider_known; this test has gone vacuous"
+    assert set(migration._PROVIDER_TABLES) == constrained
+
+
+def test_the_widening_names_constraints_the_way_the_database_does() -> None:
+    """The ALTER must use the expanded name, not the bare one 0009 was written with.
+
+    0009 and 0013 declare the CHECK as a bare ``provider_known`` and let the
+    metadata naming convention expand it while the table is being created. An
+    ``ALTER TABLE ... DROP CONSTRAINT`` gets no such expansion, so a widening
+    written in 0009's style fails at run time with "constraint does not exist" —
+    on a migration, against a real database, which is the worst place to find it
+    and the one place this repository's test suite cannot reach without Docker.
+
+    Asserted against the ORM metadata so the two cannot drift apart silently.
+    """
+    migration = importlib.import_module(
+        "backend.db.migrations.versions.0018_provider_vocabulary_groq"
+    )
+    for table_name in migration._PROVIDER_TABLES:
+        table = Base.metadata.tables[table_name]
+        declared = {
+            constraint.name for constraint in table.constraints if isinstance(constraint.name, str)
+        }
+        assert migration._constraint_name(table_name) in declared, (
+            f"{table_name}: the widening would ALTER a constraint name the schema "
+            f"does not use; metadata declares {sorted(declared)}"
+        )
 
 
 def test_migration_0009_follows_0008_and_is_append_only_where_it_claims_to_be() -> None:

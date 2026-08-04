@@ -1604,3 +1604,56 @@ never written to the repository — verified: no Groq-shaped string in the worki
 match in git history under `git log -S`, `.env` ignored at `.gitignore:2`. It has not been
 used. Rotation was requested; keys reach this system through `GROQ_API_KEY` in the
 environment and through nothing else (I5).
+
+## D-048 — Groq is a first-class provider, and the vocabulary widens rather than gets edited (2026-08-04)
+
+Adding `groq` to `Provider` is mechanical — the enum, `PROVIDER_NAMES_SQL`, a probe
+endpoint, and a migration — and three of those four were. The fourth turned out to be a
+judgement call worth recording, and it surfaced a latent bug.
+
+**The vocabulary widens; earlier revisions keep what they shipped with.** Migrations 0009
+and 0013 declare the `provider_known` CHECK. Adding a member could have been done by
+editing those files, and a database created from scratch would have come out correct —
+which is exactly what makes it tempting. It is wrong because **a migration records what
+the schema was at its point in the chain, not what it is now**: a database migrated last
+week and one created today would disagree about what 0009 did, and nothing in the chain
+would say so. So 0018 widens instead, and the drift tests were re-aimed: 0009 and 0013
+pinned to the *historical* set by frozen literal, 0018 to the *current* set, and the
+current set to the enum.
+
+**Two tests changed, and neither was weakened to pass — one got strictly stronger.**
+`test_the_provider_vocabulary_matches_the_enum_and_the_orm` asserted 0013 == ORM == enum,
+which the widening makes false. Its replacement pins 0013's set *and* asserts the current
+set is a **superset** of it — an invariant the old equality could not express: the
+vocabulary is append-only. Removing a provider would strand rows in `llm_spend_ledger`, an
+append-only table nothing may edit or delete, naming a value the CHECK no longer admits;
+the table could not be rebuilt from its own contents and the next widening's
+`ADD CONSTRAINT` would fail against rows nobody can remove.
+
+**A new test found a real bug in the migration I had just written.** 0009 declares the
+CHECK as a bare `provider_known` and relies on the metadata naming convention
+(`ck_%(table_name)s_%(constraint_name)s`) to expand it — expansion that happens for a
+constraint attached to a table being *created*. My widening copied that style into
+`ALTER TABLE ... DROP CONSTRAINT provider_known`, which gets no such expansion and would
+have failed with *"constraint does not exist"* — on a migration, against a real database,
+in the one place this suite cannot reach without Docker. Caught by
+`test_the_widening_covers_every_table_that_constrains_a_provider`, whose non-vacuity
+assertion fired first (`no mapped table declares provider_known`) because the metadata
+spells the name expanded. Verified the true name by rendering SQL offline
+(`alembic upgrade 0009 --sql`) rather than reasoning about Alembic's behaviour, and
+`test_the_widening_names_constraints_the_way_the_database_does` now holds the migration to
+the ORM's spelling.
+
+**The probe needed an endpoint and nothing else.** `build_probe_request` branches to
+`x-api-key` for Anthropic and falls through to `Authorization: Bearer`, which is Groq's
+shape too. The fallback is safe only because the *endpoint* is a per-provider lookup that
+refuses an unknown provider: the fallback picks a header shape, never a destination.
+Groq's URL sits under an `/openai/v1` prefix because it serves an OpenAI-compatible API —
+the prefix is part of Groq's own URL and the host, which is what decides where a
+credential travels, is `api.groq.com`.
+
+**What this does not do.** It does not make a call possible. There is still no
+`ModelClient` implementation anywhere in this repository — only `UnconfiguredModelClient`,
+which refuses — so Groq is now storable, assignable and probe-able, and nothing more. The
+token-budget governor D-047 calls for, and the HTTP client beneath it, are unbuilt. Saying
+"Groq is wired up" would be false.

@@ -568,7 +568,7 @@ class MacroObservation(BitemporalMixin, Base):
 # read guard.
 # ---------------------------------------------------------------------------
 
-PROVIDER_NAMES_SQL = "'anthropic', 'openai'"
+PROVIDER_NAMES_SQL = "'anthropic', 'groq', 'openai'"
 """Vocabulary of LLM providers, as the database CHECK constraints spell it.
 
 Duplicated from :class:`backend.extraction.providers.catalog.Provider` rather
