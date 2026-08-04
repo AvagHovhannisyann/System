@@ -22,8 +22,10 @@ from testcontainers.community.postgres import PostgresContainer
 from testcontainers.core.config import testcontainers_config
 from testcontainers.core.docker_client import DockerClient
 
+import backend.db.models  # noqa: F401 — imported for its side effect: populating the metadata
 from backend.core.config import get_settings
 from backend.db import dispose_database
+from backend.db.base import Base
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -92,15 +94,61 @@ def migrated_database_url() -> Iterator[str]:
         monkeypatch.undo()
 
 
+def _truncate_every_table() -> str:
+    """Return a TRUNCATE naming every mapped table, derived from the metadata.
+
+    **Derived rather than listed, because the list went stale and nobody
+    noticed.** This reset used to name four tables — ``price_bar``,
+    ``security_master``, ``security``, ``ingestion_run`` — which were all the
+    tables that existed when it was written. Fourteen more arrived since
+    (EDGAR, macro, extraction, universe, execution, monitoring), and none of
+    them was ever reset between tests.
+
+    That is invisible until a table carries state a later test reads back
+    unconditionally. Order rows hid it by construction: every test mints a
+    fresh idempotency key, so leftovers are unreachable. Halts did not — they
+    are *global* by design, since the question a halt answers is "is trading
+    stopped", not "is this order stopped". Eleven integration tests failed the
+    first time the halt log ran against a real database, each seeing every halt
+    its predecessors had engaged: ``assert 2 == 1``, then ``3 == 1``, then
+    ``4 == 1``, climbing to ``22 == 5``.
+
+    ``Base.metadata`` cannot go stale the way a literal can: a table that is not
+    in it is not mapped, and a mapped table is truncated here the moment it is
+    declared. ``alembic_version`` is safe by the same token — it belongs to
+    Alembic, not to the metadata, so it is never named and the schema survives
+    the reset.
+    """
+    names = ", ".join(sorted(Base.metadata.tables))
+    return f"TRUNCATE TABLE {names} RESTART IDENTITY CASCADE"
+
+
 @pytest.fixture(autouse=True)
 async def _clean_database(
     migrated_database_url: str,  # noqa: ARG001 — fixture dependency: container + schema first
 ) -> AsyncIterator[None]:
     """Give every integration test a migrated, empty database and a fresh engine.
 
-    Teardown truncates all fact tables (restarting identities), then disposes
-    the process-wide engine so the next test's event loop cannot inherit
-    pooled connections bound to a dead loop.
+    Setup disposes the process-wide engine *before* handing over, and teardown
+    truncates all fact tables (restarting identities) before disposing it again.
+
+    **The setup-side disposal is not symmetry, it is the fix for a real bug.**
+    ``_get_engine`` caches one engine per process, built from
+    ``get_settings().database_url`` the first time anything asks for it.
+    Disposing only on teardown leaves the *first* integration test of a session
+    inheriting whatever engine an earlier, non-integration test happened to
+    build — and that one was built before ``migrated_database_url`` pointed
+    ``DATABASE_URL`` at the container, so it addresses the default
+    ``localhost:5432`` where nothing is listening.
+
+    This is not hypothetical. It surfaced the moment P5.1 added
+    ``backend/tests/features/test_compute_lag.py``, which calls ``as_of()`` and
+    sorts before ``backend/tests/integration/``: CI began erroring in exactly
+    one place, ``test_asof_bind_integrity.py`` — the alphabetically first
+    integration module, and so the only one not already handed a fresh engine
+    by a previous test's teardown. Every later test passed, which is precisely
+    what made it read like flaky infrastructure rather than an ordering
+    dependency.
 
     The reset runs on the module-private *migration* engine, not the admin
     engine: the Core guard blocks textual SQL naming a fact table on every
@@ -110,15 +158,14 @@ async def _clean_database(
     dynamic import the migration environment uses — importing it statically
     would (correctly) trip the TID251 import contract.
     """
+    await dispose_database()
     yield
     from backend.db.engine import _create_migration_engine  # noqa: TID251 — see docstring
 
     reset_engine = _create_migration_engine()
     try:
         async with reset_engine.begin() as connection:
-            await connection.execute(
-                text("TRUNCATE TABLE price_bar, security_master, security RESTART IDENTITY CASCADE")
-            )
+            await connection.execute(text(_truncate_every_table()))
     finally:
         await reset_engine.dispose()
         await dispose_database()

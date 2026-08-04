@@ -22,9 +22,19 @@ jobs:
         run: uv run ruff format --check .
       - name: Lint
         run: uv run ruff check .
+      - name: "No-fabrication guard (CC.8 — I3: no mock/synthetic identifiers in backend/ingest)"
+        run: uv run python scripts/check_no_fabrication.py
       - name: Typecheck (strict)
         run: uv run mypy backend
-      - name: Tests (xfails forced to run)
+      # CC.6 ratchet, backend half. `--cov=backend` is what makes pytest-cov
+      # compute a total at all; the committed floor in
+      # [tool.coverage.report].fail_under of pyproject.toml is then applied to
+      # it and fails this step below the floor. The number lives in exactly one
+      # place so it cannot drift between here and the config. Note the two ways
+      # to disable this while leaving the config looking correct — dropping
+      # --cov, or adding --no-cov / a lower --cov-fail-under here — which is
+      # what backend/tests/test_coverage_ratchet.py asserts against.
+      - name: Tests + coverage floor (xfails forced to run)
         run: uv run pytest --runxfail --cov=backend --cov-report=term --junitxml=/tmp/junit.xml
       - name: Test-honesty guard (I6 — a skipped test counts as a failure)
         run: |
@@ -58,6 +68,51 @@ jobs:
         run: npx tsc --noEmit
       - name: Build
         run: npm run build
+      # CC.6 ratchet, frontend half. `test:ci` runs vitest with --coverage, and
+      # the committed thresholds in vitest.config.mts fail the run below them.
+      # Drop --coverage from that script and the thresholds are never evaluated
+      # while still reading as configured, so
+      # backend/tests/test_coverage_ratchet.py asserts on the script text too.
+      - name: Unit/component tests + coverage (fails below §8's 70%)
+        run: npm run test:ci
+      - name: Test-honesty guard (I6 — a skipped test counts as a failure)
+        run: |
+          python3 -c "
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse('vitest-junit.xml').getroot()
+          skipped = sum(int(s.get('skipped', 0)) for s in root.iter('testsuite'))
+          if skipped:
+              sys.exit(f'I6 violation: {skipped} skipped test(s) — DIRECTIVE.md section 2 I6')
+          print('I6 guard: zero skipped tests')
+          "
+
+  e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      # Browser build must match the pinned @playwright/test version; bumping
+      # one without the other breaks the launch (see playwright.config.ts).
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+      # playwright.config.ts owns the dev-server lifecycle via webServer.
+      - name: Playwright e2e
+        run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7
 
   security:
     runs-on: ubuntu-latest
@@ -72,9 +127,20 @@ jobs:
         with:
           enable-cache: true
       - name: pip-audit (locked runtime deps)
+        # --ignore-vuln CVE-2026-69247 (cryptography 49.0.0, fixed in 50.0.0).
+        # Held open deliberately, and the reasoning is in DECISIONS.md D-044.
+        # In short: mlflow 3.15.0 hard-pins "cryptography<50,>=43.0.0", so taking
+        # the fix drags mlflow down to 3.2.0, which carries 26 advisories of its
+        # own plus one in a downgraded pyarrow. Measured, not estimated: 1
+        # vulnerability against 27. The scope of this CVE could NOT be assessed -
+        # it is not yet indexed in any public database - so this is a risk
+        # ACCEPTED UNDER UNCERTAINTY, not a risk judged low.
+        # REMOVE THIS IGNORE when mlflow ships a release permitting
+        # cryptography>=50 (3.16+ did not exist as of 2026-08-04). Removing it
+        # then is the whole point of writing the condition down.
         run: |
           uv export --locked --no-dev --no-emit-project --format requirements-txt -o /tmp/requirements.txt
-          uvx pip-audit -r /tmp/requirements.txt
+          uvx pip-audit -r /tmp/requirements.txt --ignore-vuln CVE-2026-69247
       - uses: actions/setup-node@v4
         with:
           node-version: 22

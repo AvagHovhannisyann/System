@@ -12,12 +12,27 @@ const compat = new FlatCompat({
 const eslintConfig = [
   ...compat.extends("next/core-web-vitals", "next/typescript"),
   {
+    // The Playwright end-to-end harness contains no React. Its fixture
+    // callbacks take a parameter named `use` (the documented Playwright
+    // idiom), which the React Hooks plugin misreads as the `use` hook.
+    files: ["e2e/**/*.ts", "playwright.config.ts"],
+    rules: {
+      "react-hooks/rules-of-hooks": "off",
+    },
+  },
+  {
     ignores: [
       "node_modules/**",
       ".next/**",
       "out/**",
       "build/**",
       "next-env.d.ts",
+      // Generated test artefacts: the v8/istanbul HTML coverage report ships
+      // its own vendored JS, and Playwright's report/trace output is a build
+      // product. Neither is source and neither is committed.
+      "coverage/**",
+      "playwright-report/**",
+      "test-results/**",
     ],
   },
 ];

@@ -23,6 +23,10 @@ database — every assertion here fires *before* any connection I/O:
 - **(c) writer-session SELECT raises.**
 - **(d) public-surface introspection.** ``backend.db`` exports exactly the
   curated names; none is (or wraps) a raw engine/sessionmaker handle.
+- **(e) default-deny at the SQL boundary.** The property that makes the
+  layers above non-load-bearing: with the structural walker *stubbed blind*,
+  a statement that really reads a fact table is still refused — on the
+  strength of its compiled SQL alone.
 
 End-to-end enforcement against real TimescaleDB (including the paths this
 file cannot prove without I/O) lives in
@@ -37,7 +41,7 @@ import subprocess
 import sys
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 import sqlalchemy as sa
@@ -49,14 +53,17 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.schema import CreateTable
 
 import backend.db
 from backend.db import (
     BitemporalBypassError,
     BitemporalRewriteError,
+    _guard,
     dispose_database,
     ingest_writer_session,
 )
+from backend.db._guard import References, install_core_guard
 from backend.db.models import PriceBar, Security
 
 if TYPE_CHECKING:
@@ -316,3 +323,92 @@ def test_exported_error_types_grant_no_session_capability() -> None:
         assert issubclass(exported, Exception)
         assert not hasattr(exported, "session")
         assert not hasattr(exported, "engine")
+
+
+# --- (e) default-deny at the SQL boundary -----------------------------------
+
+_NO_REFERENCES = References(frozenset(), frozenset(), frozenset())
+
+_SQL_BOUNDARY_REFUSAL = "unsanctioned SQL naming bitemporal fact table"
+"""Substring identifying a refusal raised by the final-SQL arbiter.
+
+Matching it (rather than just the table name) is what proves *which* layer
+refused: the structural pre-checks produce different messages, so a test that
+matched only ``price_bar`` would still pass if the cursor-boundary scan were
+deleted and the structural walker happened to catch the statement.
+"""
+
+
+def _blind_walker(element: object, table_names: frozenset[str]) -> References:  # noqa: ARG001
+    """Stand in for a clause shape the structural walker cannot see.
+
+    Returns "no bitemporal references" for *every* statement, which is what a
+    walker blind spot looks like from the enforcement layer's point of view:
+    not an error, just silence. Enumerating real blind spots would only test
+    the shapes we already thought of; stubbing the walker tests the
+    architecture instead.
+    """
+    return _NO_REFERENCES
+
+
+def test_structural_blind_spot_is_still_refused_at_the_sql_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A select the walker cannot see must raise, not read unversioned (I1).
+
+    This is the load-bearing test of the enforcement model. With the walker
+    stubbed blind, every structural check passes the statement — and it is
+    still refused, because the guard denies by default on the compiled SQL
+    and nothing sanctioned this execution.
+
+    Before the default-deny inversion this returned rows: ``before_execute``
+    saw no references, and ``before_cursor_execute`` skipped its name scan for
+    anything compiled from a clause element, so the SQL reached Postgres
+    unversioned with no error at all.
+    """
+    monkeypatch.setattr(_guard, "collect_references", _blind_walker)
+    engine = create_engine("sqlite://")
+    install_core_guard(engine)
+    try:
+        with (
+            engine.connect() as connection,
+            pytest.raises(BitemporalBypassError, match=_SQL_BOUNDARY_REFUSAL) as raised,
+        ):
+            connection.execute(select(PriceBar.close_usd))
+        assert "price_bar" in str(raised.value)
+    finally:
+        engine.dispose()
+
+
+def test_blind_walker_does_not_break_statements_naming_no_fact_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default-deny keys on the SQL, so a blind walker costs clean statements nothing."""
+    monkeypatch.setattr(_guard, "collect_references", _blind_walker)
+    engine = create_engine("sqlite://")
+    install_core_guard(engine)
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(select(sa.literal(1))).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_ddl_naming_a_fact_table_is_refused_on_a_guarded_engine() -> None:
+    """DDL is not sanctioned: fact-table DDL belongs on the migration engine.
+
+    ``ExecutableDDLElement`` covers ``sqlalchemy.schema.DDL``, which carries
+    arbitrary SQL text, so a blanket DDL exemption would be an arbitrary-read
+    path through the public admin engine. Sanctioned fact-table DDL (alembic)
+    runs on the unguarded module-private migration engine instead (D-012).
+    """
+    engine = create_engine("sqlite://")
+    install_core_guard(engine)
+    try:
+        with (
+            engine.connect() as connection,
+            pytest.raises(BitemporalBypassError, match=_SQL_BOUNDARY_REFUSAL),
+        ):
+            connection.execute(CreateTable(cast("sa.Table", PriceBar.__table__)))
+    finally:
+        engine.dispose()

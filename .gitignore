@@ -28,9 +28,20 @@ frontend/next-env.d.ts
 data/
 mlruns/
 mlartifacts/
+mlflow.db
 *.parquet
 *.csv
 *.duckdb
+
+# DVC (CC.3): the pointers are committed, the bytes are not.
+# Tracked: .dvc/config, .dvc/.gitignore, .dvcignore, and every *.dvc pointer.
+# Ignored: the local content-addressed cache, DVC's scratch state, and
+# .dvc/config.local (where a remote's credentials live — I5).
+# `.dvc/.gitignore` already lists these three; repeated here so that deleting
+# or overwriting that file cannot silently start committing the cache.
+/.dvc/cache/
+/.dvc/tmp/
+/.dvc/config.local
 
 # misc
 .DS_Store

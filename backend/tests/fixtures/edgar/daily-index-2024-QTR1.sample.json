@@ -1,0 +1,118 @@
+{
+  "_provenance": {
+    "source-url": "https://www.sec.gov/Archives/edgar/daily-index/2024/QTR1/index.json",
+    "captured-on": "2026-08-01",
+    "verbatim": "every object under directory.item is byte-equal to an entry of that response; the response listed 310 entries and this fixture keeps the 15 whose names carry the dates 20240308 / 20240311 / 20240312. The _provenance key was added at capture and is not part of the SEC response.",
+    "why": "the connector enumerates the quarter listing instead of guessing dates: EDGAR answers a request for a non-existent daily-index file with HTTP 403 (S3 AccessDenied), which is indistinguishable from a fair-access block, so date guessing cannot be made safe."
+  },
+  "directory": {
+    "name": "daily-index/2024/QTR1/",
+    "item": [
+      {
+        "last-modified": "03/08/2024 10:06:44 PM",
+        "name": "company.20240308.idx",
+        "type": "file",
+        "href": "company.20240308.idx",
+        "size": "856 KB"
+      },
+      {
+        "last-modified": "03/11/2024 10:06:27 PM",
+        "name": "company.20240311.idx",
+        "type": "file",
+        "href": "company.20240311.idx",
+        "size": "796 KB"
+      },
+      {
+        "last-modified": "03/12/2024 10:06:35 PM",
+        "name": "company.20240312.idx",
+        "type": "file",
+        "href": "company.20240312.idx",
+        "size": "874 KB"
+      },
+      {
+        "last-modified": "03/08/2024 10:06:48 PM",
+        "name": "crawler.20240308.idx",
+        "type": "file",
+        "href": "crawler.20240308.idx",
+        "size": "1049 KB"
+      },
+      {
+        "last-modified": "03/11/2024 10:06:29 PM",
+        "name": "crawler.20240311.idx",
+        "type": "file",
+        "href": "crawler.20240311.idx",
+        "size": "975 KB"
+      },
+      {
+        "last-modified": "03/12/2024 10:06:36 PM",
+        "name": "crawler.20240312.idx",
+        "type": "file",
+        "href": "crawler.20240312.idx",
+        "size": "1071 KB"
+      },
+      {
+        "last-modified": "03/08/2024 10:06:41 PM",
+        "name": "form.20240308.idx",
+        "type": "file",
+        "href": "form.20240308.idx",
+        "size": "856 KB"
+      },
+      {
+        "last-modified": "03/11/2024 10:06:24 PM",
+        "name": "form.20240311.idx",
+        "type": "file",
+        "href": "form.20240311.idx",
+        "size": "795 KB"
+      },
+      {
+        "last-modified": "03/12/2024 10:06:33 PM",
+        "name": "form.20240312.idx",
+        "type": "file",
+        "href": "form.20240312.idx",
+        "size": "874 KB"
+      },
+      {
+        "last-modified": "03/08/2024 10:06:38 PM",
+        "name": "master.20240308.idx",
+        "type": "file",
+        "href": "master.20240308.idx",
+        "size": "495 KB"
+      },
+      {
+        "last-modified": "03/11/2024 10:06:21 PM",
+        "name": "master.20240311.idx",
+        "type": "file",
+        "href": "master.20240311.idx",
+        "size": "454 KB"
+      },
+      {
+        "last-modified": "03/12/2024 10:06:32 PM",
+        "name": "master.20240312.idx",
+        "type": "file",
+        "href": "master.20240312.idx",
+        "size": "504 KB"
+      },
+      {
+        "last-modified": "03/08/2024 10:06:51 PM",
+        "name": "sitemap.20240308.xml",
+        "type": "file",
+        "href": "sitemap.20240308.xml",
+        "size": "1234 KB"
+      },
+      {
+        "last-modified": "03/11/2024 10:06:31 PM",
+        "name": "sitemap.20240311.xml",
+        "type": "file",
+        "href": "sitemap.20240311.xml",
+        "size": "1147 KB"
+      },
+      {
+        "last-modified": "03/12/2024 10:06:38 PM",
+        "name": "sitemap.20240312.xml",
+        "type": "file",
+        "href": "sitemap.20240312.xml",
+        "size": "1260 KB"
+      }
+    ]
+  }
+}

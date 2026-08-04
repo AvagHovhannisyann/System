@@ -1,0 +1,89 @@
+{
+  "_provenance": {
+    "captured_on": "2026-08-01",
+    "what": "Two independent EDGAR expressions of the same acceptance instant for eight real filings. 'sgml_acceptance_datetime' is the verbatim <ACCEPTANCE-DATETIME> value from each filing's own -index-headers.html; 'submissions_acceptance_datetime' is the verbatim acceptanceDateTime string from data.sec.gov's submissions JSON for the same accession. No value here was computed, rounded or reformatted.",
+    "observation": "For six of the eight, submissions_acceptance_datetime equals the SGML value read as America/New_York and converted to UTC (+5h under EST, +4h under EDT) - which is what proves the SGML value is Eastern local time. For the two filings under CIK 1750284 the submissions value instead repeats the Eastern wall clock with a 'Z' suffix. 17 CFR 232.13(a)(2) settles which reading is correct: 0001243233-24-000002 carries acceptance 18:55:18 and EDGAR filing date 2024-12-12, one business day after the acceptance date, which only follows if 18:55:18 is Eastern (after the 5:30 p.m. ET cut-off). Read as UTC it would be 13:55 ET and the filing date would have been 2024-12-11. The connector therefore derives knowledge_time from the SGML header and never from data.sec.gov."
+  },
+  "records": [
+    {
+      "accession_number": "0001225208-24-004041",
+      "cik": 1796799,
+      "form": "4",
+      "sgml_acceptance_datetime": "20240311201308",
+      "sgml_source_url": "https://www.sec.gov/Archives/edgar/data/1796799/000122520824004041/0001225208-24-004041-index-headers.html",
+      "submissions_acceptance_datetime": "2024-03-12T00:13:08.000Z",
+      "submissions_filing_date": "2024-03-11",
+      "submissions_source_url": "https://data.sec.gov/submissions/CIK0001796799.json"
+    },
+    {
+      "accession_number": "0001225208-24-002776",
+      "cik": 1796799,
+      "form": "4",
+      "sgml_acceptance_datetime": "20240222194755",
+      "sgml_source_url": "https://www.sec.gov/Archives/edgar/data/1796799/000122520824002776/0001225208-24-002776-index-headers.html",
+      "submissions_acceptance_datetime": "2024-02-23T00:47:55.000Z",
+      "submissions_filing_date": "2024-02-22",
+      "submissions_source_url": "https://data.sec.gov/submissions/CIK0001796799.json"
+    },
+    {
+      "accession_number": "0001225208-24-004467",
+      "cik": 1796799,
+      "form": "4/A",
+      "sgml_acceptance_datetime": "20240325060029",
+      "sgml_source_url": "https://www.sec.gov/Archives/edgar/data/1796799/000122520824004467/0001225208-24-004467-index-headers.html",
+      "submissions_acceptance_datetime": "2024-03-25T10:00:29.000Z",
+      "submissions_filing_date": "2024-03-25",
+      "submissions_source_url": "https://data.sec.gov/submissions/CIK0001796799.json"
+    },
+    {
+      "accession_number": "0000950170-24-029225",
+      "cik": 100726,
+      "form": "8-K",
+      "sgml_acceptance_datetime": "20240311160612",
+      "sgml_source_url": "https://www.sec.gov/Archives/edgar/data/100726/000095017024029225/0000950170-24-029225-index-headers.html",
+      "submissions_acceptance_datetime": "2024-03-11T20:06:12.000Z",
+      "submissions_filing_date": "2024-03-11",
+      "submissions_source_url": "https://data.sec.gov/submissions/CIK0000100726.json"
+    },
+    {
+      "accession_number": "0001104659-24-082105",
+      "cik": 1000184,
+      "form": "6-K",
+      "sgml_acceptance_datetime": "20240724073816",
+      "sgml_source_url": "https://www.sec.gov/Archives/edgar/data/1000184/000110465924082105/0001104659-24-082105-index-headers.html",
+      "submissions_acceptance_datetime": "2024-07-24T11:38:16.000Z",
+      "submissions_filing_date": "2024-07-24",
+      "submissions_source_url": "https://data.sec.gov/submissions/CIK0001000184.json"
+    },
+    {
+      "accession_number": "0001104659-24-032038",
+      "cik": 1000184,
+      "form": "6-K",
+      "sgml_acceptance_datetime": "20240308060045",
+      "sgml_source_url": "https://www.sec.gov/Archives/edgar/data/1000184/000110465924032038/0001104659-24-032038-index-headers.html",
+      "submissions_acceptance_datetime": "2024-03-08T11:00:45.000Z",
+      "submissions_filing_date": "2024-03-08",
+      "submissions_source_url": "https://data.sec.gov/submissions/CIK0001000184.json"
+    },
+    {
+      "accession_number": "0001243233-24-000002",
+      "cik": 1750284,
+      "form": "D",
+      "sgml_acceptance_datetime": "20241211185518",
+      "sgml_source_url": "https://www.sec.gov/Archives/edgar/data/1750284/000124323324000002/0001243233-24-000002-index-headers.html",
+      "submissions_acceptance_datetime": "2024-12-11T18:55:18.000Z",
+      "submissions_filing_date": "2024-12-12",
+      "submissions_source_url": "https://data.sec.gov/submissions/CIK0001750284.json"
+    },
+    {
+      "accession_number": "0000950170-24-125427",
+      "cik": 1750284,
+      "form": "10-Q",
+      "sgml_acceptance_datetime": "20241112161525",
+      "sgml_source_url": "https://www.sec.gov/Archives/edgar/data/1750284/000095017024125427/0000950170-24-125427-index-headers.html",
+      "submissions_acceptance_datetime": "2024-11-12T16:15:25.000Z",
+      "submissions_filing_date": "2024-11-12",
+      "submissions_source_url": "https://data.sec.gov/submissions/CIK0001750284.json"
+    }
+  ]
+}

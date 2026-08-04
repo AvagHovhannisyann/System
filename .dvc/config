@@ -1,0 +1,16 @@
+# DVC repository config — committed (CC.3, invariant I2).
+#
+# Machine-local overrides belong in .dvc/config.local, which .dvc/.gitignore
+# keeps out of git. That is where a remote's credentials go — never in this
+# file, which is tracked (directive §7, I5).
+#
+# No default remote is configured yet. `dvc push` / `dvc pull` need one, and the
+# storage location plus its credentials are a human decision; no vendor data has
+# landed either (BLOCKERS.md B1). Without a remote, DVC still hashes local data
+# and writes the pointer that supplies I2's data-version component — it just
+# cannot yet ship those bytes to another machine.
+#
+# analytics: DVC reports anonymised usage by default. Off here so no build or
+# CI runner phones home from this repository.
+[core]
+    analytics = false

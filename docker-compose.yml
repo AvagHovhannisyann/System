@@ -28,21 +28,91 @@ services:
       timeout: 3s
       retries: 12
 
+  mlflow:
+    # Experiment tracking store for I2 (CC.3). Version pinned to the same 3.15.0
+    # the `mlflow` client in uv.lock resolves to: client and server share a
+    # backing-store schema, and a floating tag would let a `docker compose pull`
+    # migrate the store out from under the pinned client.
+    image: ghcr.io/mlflow/mlflow:v3.15.0
+    command:
+      - mlflow
+      - server
+      - --host=0.0.0.0
+      - --port=5000
+      # SQLite, not the file store: MLflow 3 put the filesystem backend in
+      # maintenance mode, and this is the same serverless backend
+      # backend/tracking/mlflow_run.py uses locally. Single worker because
+      # concurrent writers to one SQLite file produce "database is locked";
+      # a shared team server would move --backend-store-uri to Postgres.
+      - --workers=1
+      - --backend-store-uri=sqlite:////mlflow/mlflow.db
+      # Runs and artifacts both land on the mlflowdata volume, so history
+      # survives `docker compose down` and any container replacement. A
+      # tracking server that loses history does not satisfy I2.
+      - --artifacts-destination=/mlflow/artifacts
+      # MLflow 3 validates the Host header against localhost + private IPs by
+      # default, and rejects everything else with 403. `mlflow:5000` is a
+      # hostname, not an IP, so the backend's calls would be refused without
+      # this. Passing the flag REPLACES the defaults, hence the localhost
+      # entries for the browser on the host. Note the /health endpoint is
+      # exempt from this check, so the healthcheck below stays green even if
+      # this list is wrong — the compose test asserts the service name is in it.
+      - --allowed-hosts=mlflow:5000,localhost:5000,127.0.0.1:5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflowdata:/mlflow
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/health', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
   backend:
     build:
       context: .
       dockerfile: docker/backend.Dockerfile
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quant}@db:5432/${POSTGRES_DB:-quant}
+      # Two roles, never one (CC.9, DECISIONS.md D-017). The serving process
+      # authenticates as the application role: SELECT/INSERT, owns nothing, so
+      # it cannot DROP or DISABLE the append-only triggers, ALTER a table, or
+      # TRUNCATE one. "Immutable audit log" is only a true claim because this
+      # credential cannot revoke the enforcement on itself.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_APP_USER:-quant_app}:${POSTGRES_APP_PASSWORD:-quant_app}@db:5432/${POSTGRES_DB:-quant}
+      # Alembic — and only alembic — connects as the schema owner. The
+      # entrypoint unsets this before exec'ing uvicorn, so the serving process
+      # does not hold the owner credential at all.
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-quant}:${POSTGRES_PASSWORD:-quant}@db:5432/${POSTGRES_DB:-quant}
+      # Read by migration 0015 when it creates or re-points the application
+      # role. Same two variables that compose DATABASE_URL above, so the role
+      # the migration creates and the role the app logs in as cannot disagree.
+      # Local-development defaults follow POSTGRES_USER/POSTGRES_PASSWORD:
+      # a known throwaway credential for a database that holds nothing.
+      APP_DB_ROLE: ${POSTGRES_APP_USER:-quant_app}
+      APP_DB_PASSWORD: ${POSTGRES_APP_PASSWORD:-quant_app}
       REDIS_URL: redis://redis:6379/0
+      # Read by the MLflow client as its default tracking URI. Not templated:
+      # this is a compose-network address, and pointing it elsewhere by
+      # environment is how runs end up recorded somewhere nobody looks.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
       ENVIRONMENT: ${ENVIRONMENT:-dev}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Required at ENVIRONMENT=prod (hard startup failure without it); at the
+      # dev default an ephemeral key is generated with a warning.
+      CSRF_SECRET: ${CSRF_SECRET:-}
+      SECRETS_KEK: ${SECRETS_KEK:-}
     ports:
       - "8000:8000"
     depends_on:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      # service_healthy, like the other two: a training or backtest job started
+      # before the tracking server is up cannot record its reproducibility
+      # stamp, and an unrecorded result is one nobody can regenerate (I2).
+      mlflow:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).status==200 else 1)"]
@@ -63,3 +133,4 @@ services:
 
 volumes:
   dbdata:
+  mlflowdata:

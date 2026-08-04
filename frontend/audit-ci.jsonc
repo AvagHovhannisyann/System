@@ -5,12 +5,13 @@
   // and a removal condition. Do not allowlist anything without both.
   "high": true,
   "allowlist": [
-    // brace-expansion DoS (unbounded expansion → OOM). Reached only through the
-    // eslint/minimatch toolchain at lint time on developer/CI machines; never in
-    // the shipped app. The advisory range covers every release reachable from
-    // eslint 9 — the only offered "fix" is an eslint major pre-release.
-    // Remove when eslint-config-next ships against a patched chain.
-    "GHSA-mh99-v99m-4gvg",
+    // (GHSA-mh99-v99m-4gvg, brace-expansion, was here. Its removal condition —
+    // "when eslint-config-next ships against a patched chain" — has been met:
+    // brace-expansion now resolves to 1.1.18 and 5.0.9, both patched, and
+    // audit-ci reports the advisory as no longer found. Removed rather than
+    // left in place, because an allowlist entry that matches nothing today
+    // still silently absolves the same advisory if a future resolution
+    // reintroduces it — a stale entry is an unnoticed exception, not a no-op.)
     // postcss advisories (sourceMappingURL file read; source-map path traversal).
     // postcss is BUNDLED inside next itself — the advisory range covers every
     // published next release, so no upgrade fixes it. Exposure requires processing

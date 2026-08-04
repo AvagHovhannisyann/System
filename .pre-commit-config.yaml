@@ -25,3 +25,9 @@ repos:
         entry: uv run ruff check --force-exclude
         language: system
         types_or: [python, pyi]
+      - id: no-fabrication-guard
+        name: CC.8 no-fabrication guard (I3) over backend/ingest
+        entry: uv run python scripts/check_no_fabrication.py
+        language: system
+        always_run: true
+        pass_filenames: false

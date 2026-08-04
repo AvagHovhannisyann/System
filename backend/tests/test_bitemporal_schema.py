@@ -7,6 +7,8 @@ same schema is exercised against a real TimescaleDB in
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -24,14 +26,25 @@ from sqlalchemy.types import DateTime, TypeDecorator
 
 from backend.db.base import Base
 from backend.db.bitemporal import (
+    OBSERVATION_PAYLOAD_PRESENT,
+    RETRACTION_PAYLOAD_ABSENT,
+    TEMPORAL_COLUMNS,
     BitemporalMixin,
     bitemporal_classes,
     bitemporal_mappers,
     bitemporal_tables,
 )
-from backend.db.models import PriceBar, Security, SecurityMaster
+from backend.db.models import MacroObservation, PriceBar, Security, SecurityMaster
 
 _TEMPORAL_COLUMNS = ("valid_from", "valid_to", "knowledge_time", "ingested_at")
+
+_MIGRATION_0012 = (
+    Path(__file__).resolve().parents[1]
+    / "db"
+    / "migrations"
+    / "versions"
+    / "0012_retraction_payload.py"
+)
 
 
 def _table(model: type) -> Table:
@@ -103,13 +116,169 @@ def test_primary_key_is_logical_key_plus_versioning_axes(model: type[BitemporalM
     assert tuple(c.name for c in table.primary_key.columns) == expected
 
 
+def _check_constraint(table: Table, unprefixed_name: str) -> CheckConstraint:
+    """Return the named CHECK on ``table`` (naming convention applied), asserting it exists."""
+    expected = f"ck_{table.name}_{unprefixed_name}"
+    for constraint in table.constraints:
+        if isinstance(constraint, CheckConstraint) and constraint.name == expected:
+            return constraint
+    message = f"{table.name} has no CHECK constraint {expected}"
+    raise AssertionError(message)
+
+
+def _migration_0012_statements() -> list[str]:
+    """Return every SQL string literal revision 0012 passes to ``op.execute``."""
+    tree = ast.parse(_MIGRATION_0012.read_text())
+    return [
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "execute"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+    ]
+
+
+@pytest.mark.parametrize("model", bitemporal_classes())
+def test_payload_is_every_column_that_is_neither_key_nor_temporal(
+    model: type[BitemporalMixin],
+) -> None:
+    """P2.10: ``__bitemporal_payload__`` is derived by subtraction, not by hand.
+
+    Derived from the table itself so a fact table added by a later phase is
+    covered without anyone editing this test — the same reasoning as the
+    registry test below. A hand-maintained list would stop being the invariant
+    the moment a column is added.
+    """
+    table = _table(model)
+    expected = tuple(
+        column.name
+        for column in table.columns
+        if column.name not in {*TEMPORAL_COLUMNS, *model.__bitemporal_key__}
+    )
+    assert model.__bitemporal_payload__ == expected
+    assert set(model.__bitemporal_required_payload__) <= set(expected)
+
+
+@pytest.mark.parametrize("model", bitemporal_classes())
+def test_payload_columns_are_ddl_nullable(model: type[BitemporalMixin]) -> None:
+    """A retraction has no payload, so payload columns must be able to hold NULL.
+
+    The key and temporal columns stay NOT NULL: a retraction still addresses a
+    fact, so it repeats the logical key and the valid interval.
+    """
+    table = _table(model)
+    for name in model.__bitemporal_payload__:
+        assert table.c[name].nullable is True, f"{table.name}.{name} must be DDL-nullable (P2.10)"
+    for name in (*model.__bitemporal_key__, *TEMPORAL_COLUMNS):
+        assert table.c[name].nullable is False, f"{table.name}.{name} must stay NOT NULL"
+
+
+@pytest.mark.parametrize("model", bitemporal_classes())
+def test_retraction_payload_absent_check_covers_every_payload_column(
+    model: type[BitemporalMixin],
+) -> None:
+    """The CHECK that makes a retraction structurally incapable of carrying a value.
+
+    Every payload column, not a subset: a single column left out is a column
+    a retraction could still put a fabricated number in (I3).
+    """
+    table = _table(model)
+    assert model.__bitemporal_payload__, (
+        f"{table.name} has no payload columns; a fact table with nothing but key and "
+        "temporal columns records no fact and the P2.10 constraints would be tautologies"
+    )
+    constraint = _check_constraint(table, RETRACTION_PAYLOAD_ABSENT)
+    clauses = " AND ".join(f"{name} IS NULL" for name in model.__bitemporal_payload__)
+    assert str(constraint.sqltext) == f"NOT is_retraction OR ({clauses})"
+
+
+@pytest.mark.parametrize("model", bitemporal_classes())
+def test_observation_payload_present_check_preserves_the_old_not_null(
+    model: type[BitemporalMixin],
+) -> None:
+    """Observations keep exactly the guarantee ``NOT NULL`` gave them, no less.
+
+    ``__bitemporal_required_payload__`` is read off the model's own
+    ``Mapped[...]`` annotations, so this asserts the CHECK covers precisely the
+    columns the model declares non-optional.
+    """
+    table = _table(model)
+    constraint = _check_constraint(table, OBSERVATION_PAYLOAD_PRESENT)
+    clauses = " AND ".join(f"{name} IS NOT NULL" for name in model.__bitemporal_required_payload__)
+    assert str(constraint.sqltext) == f"is_retraction OR ({clauses})"
+
+
+def test_optional_payload_columns_are_the_ones_the_source_may_not_state() -> None:
+    """A column outside the required set is one the *source* may leave unstated.
+
+    Pinned on two models with a genuinely optional payload so the distinction
+    cannot quietly collapse into "everything is optional now", which is what a
+    careless widening of the required set would look like.
+    """
+    assert SecurityMaster.__bitemporal_required_payload__ == ("ticker", "name", "exchange")
+    assert set(SecurityMaster.__bitemporal_payload__) - set(
+        SecurityMaster.__bitemporal_required_payload__
+    ) == {"first_listed_on", "delisted_on"}
+    # macro_observation.value is NULL exactly when FRED reported the "." marker,
+    # which is knowledge, not absence of it (see the model docstring).
+    assert MacroObservation.__bitemporal_required_payload__ == (
+        "is_missing",
+        "vintage_start_date",
+    )
+
+
+@pytest.mark.parametrize("model", bitemporal_classes())
+def test_migration_0012_matches_the_model_payload_constraints(
+    model: type[BitemporalMixin],
+) -> None:
+    """Revision 0012's DDL must state the same CHECK expressions the models do.
+
+    The migration writes the expressions out verbatim (so they are greppable
+    in the file that installs them) while the models generate them; this is
+    what stops the two from drifting into a database whose constraints differ
+    from the metadata every test above inspects.
+    """
+    table = _table(model)
+    statements = _migration_0012_statements()
+    for unprefixed in (RETRACTION_PAYLOAD_ABSENT, OBSERVATION_PAYLOAD_PRESENT):
+        constraint = _check_constraint(table, unprefixed)
+        fragment = f"CONSTRAINT {constraint.name} CHECK ({constraint.sqltext})"
+        assert any(fragment in statement for statement in statements), (
+            f"revision 0012 does not install {constraint.name} with the expression the "
+            f"model declares: {fragment}"
+        )
+    for name in model.__bitemporal_required_payload__:
+        fragment = f"ALTER COLUMN {name} DROP NOT NULL"
+        assert any(
+            fragment in statement and f"ALTER TABLE {table.name} " in statement
+            for statement in statements
+        ), f"revision 0012 does not drop NOT NULL on {table.name}.{name}"
+
+
 def test_registry_contains_exactly_the_bitemporal_mappers() -> None:
-    """The registry the query layer consumes lists every bitemporal mapper, nothing else."""
-    expected: set[type[BitemporalMixin]] = {SecurityMaster, PriceBar}
-    assert set(bitemporal_classes()) == expected
+    """The registry the query layer consumes lists every bitemporal mapper, nothing else.
+
+    The expectation is *derived* from the ORM's own mapper registry rather than
+    frozen as a list of models. A frozen list would say "these two tables
+    exist", which stops being the invariant the moment a phase adds a fact
+    table (P3.2 adds two) — and a registry that silently missed a new mapper is
+    precisely what would let a fact table escape the as-of read enforcement, so
+    the check has to keep biting as tables are added rather than be edited each
+    time.
+    """
+    mapped_bitemporal = {
+        mapper.class_
+        for mapper in Base.registry.mappers
+        if issubclass(mapper.class_, BitemporalMixin)
+    }
+    assert {SecurityMaster, PriceBar} <= mapped_bitemporal
+    assert set(bitemporal_classes()) == mapped_bitemporal
     assert _table(Security).name not in {t.name for t in bitemporal_tables()}
-    assert {m.class_ for m in bitemporal_mappers()} == expected
-    assert bitemporal_tables() == frozenset({_table(SecurityMaster), _table(PriceBar)})
+    assert {m.class_ for m in bitemporal_mappers()} == mapped_bitemporal
+    assert bitemporal_tables() == frozenset(_table(model) for model in mapped_bitemporal)
 
 
 def test_bitemporal_key_declared_per_model() -> None:
@@ -147,11 +316,17 @@ def test_security_anchor_shape() -> None:
 
 
 def test_price_bar_unit_bearing_columns() -> None:
-    """Column names carry units (directive §8): *_usd, volume_shares, dimensionless factor."""
+    """Column names carry units (directive §8): *_usd, volume_shares, dimensionless factor.
+
+    The price columns are DDL-nullable since P2.10 — a retraction has no
+    payload to put in them — but every one of them is still *required on an
+    observation*, which is asserted below via ``__bitemporal_required_payload__``
+    rather than by ``NOT NULL``. The guarantee moved; it did not weaken.
+    """
     table = _table(PriceBar)
     for name in ("open_usd", "high_usd", "low_usd", "close_usd", "close_raw_usd"):
         assert isinstance(table.c[name].type, Numeric)
-        assert table.c[name].nullable is False
+        assert name in PriceBar.__bitemporal_required_payload__
     assert isinstance(table.c["volume_shares"].type, BigInteger)
     assert isinstance(table.c["adjustment_factor"].type, Numeric)
     fks = list(table.c["security_id"].foreign_keys)

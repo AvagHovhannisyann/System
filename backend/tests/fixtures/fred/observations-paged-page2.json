@@ -1,0 +1,30 @@
+{
+ "_provenance": {
+  "origin": "constructed",
+  "constructed_at": "2026-08-01",
+  "warning": "NOT CAPTURED FROM FRED. NOT ECONOMIC DATA.",
+  "schema_reference": "https://fred.stlouisfed.org/docs/api/fred/series_observations.html",
+  "schema_fidelity": "See observations-paged-page1.json.",
+  "scenario": "Page 2 of 2: offset 2 of count 3, so the connector must stop here rather than request a third page."
+ },
+ "realtime_start": "1776-07-04",
+ "realtime_end": "9999-12-31",
+ "observation_start": "1776-07-04",
+ "observation_end": "9999-12-31",
+ "units": "lin",
+ "output_type": 1,
+ "file_type": "json",
+ "order_by": "observation_date",
+ "sort_order": "asc",
+ "count": 3,
+ "offset": 2,
+ "limit": 2,
+ "observations": [
+  {
+   "realtime_start": "2024-02-15",
+   "realtime_end": "9999-12-31",
+   "date": "2024-01-03",
+   "value": "6.3"
+  }
+ ]
+}
