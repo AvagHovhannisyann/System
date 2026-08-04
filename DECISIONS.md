@@ -1362,3 +1362,33 @@ is not masked by the floor alone. Rather than assert the absence of leaks and st
 asserts that a specific known residue (`"DEERFIELD PARTNERS, L.P."`) *survives* — so any
 change in that residue has to be seen rather than discovered later. Caller-supplied
 declarations are **unioned** with the floor, never substituted for it.
+
+## D-043 — B1 is resolved by CRSP/Compustat via WRDS, not by purchasing Sharadar (2026-08-03)
+
+**Supersedes D-015's vendor selection.** The operator is a University of Chicago student, and
+UChicago provides WRDS access to current students free of charge. That makes CRSP available,
+which is both **free** and **strictly better** than the Sharadar feeds D-015 chose — CRSP is
+the reference survivorship-bias-free database, founded at Chicago Booth in 1960, and it is
+what the academic literature this project's factor expectations are drawn from (D-029)
+actually used.
+
+**What it supplies that the free alternatives cannot.** Daily prices from 1925 including
+**delisted securities**, and — the part that matters most — **delisting returns**: what a
+stock actually did on the way out. Every free price source fails here, and a universe of
+survivors makes every strategy look brilliant because it was only ever tested on winners.
+Compustat supplies fundamentals as-first-reported, which is the point-in-time property P3.5
+needs.
+
+**The licence constraint, recorded because it binds a future decision, not this one.** WRDS
+and CRSP academic licences cover research and teaching, **not commercial use**. This project
+is paper-trading only, permanently and structurally (§1.1, D-033) — there is no real capital
+by design and no code path to any — so the licence and the directive agree exactly. But if
+real capital were ever contemplated, the data licence would have to change *before* the
+trading did, and that ordering is easy to get backwards.
+
+**What this does not resolve.** CRSP/Compustat do not carry short interest, so **B7 stands**
+— FINRA publishes it free and that is the intended source. Nor does it supply earnings-call
+transcripts, so `qa_evasiveness_shift` remains blocked (B1 addendum). Access being granted
+is also not the same as the connector being written: P3.3–P3.6 are still unbuilt, and the
+D-015 requirement to **validate point-in-time correctness before trusting a feed** applies to
+CRSP exactly as it would have to a paid vendor.

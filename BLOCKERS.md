@@ -4,7 +4,24 @@ Format: ID, opened date, what is blocked, what is needed, status.
 
 ---
 
-## B1 — Data vendor selection + API keys — DECIDED, ACTION PENDING (2026-07-31)
+## B1 — Data vendor selection + API keys — RESOLUTION PATH FOUND (2026-08-03)
+
+**2026-08-03: superseded by D-043 — use CRSP/Compustat via WRDS, free through the
+operator's University of Chicago affiliation, instead of purchasing Sharadar.** CRSP is
+the reference survivorship-bias-free database and carries **delisting returns**, which no
+free source does and which Sharadar would have supplied less completely. Access is via
+`guides.lib.uchicago.edu/wrds` (a Day Pass grants access in minutes; a full student
+account needs local administrator approval). Licence covers **academic research and
+teaching, not commercial use** — compatible with this system, which is paper-only by
+design and has no code path to real capital.
+
+**Still open even with access granted:** the connectors (P3.3-P3.6) are unwritten, and
+D-015's requirement to validate point-in-time correctness before trusting a feed applies
+to CRSP exactly as it would to a paid vendor. Short interest is **not** in CRSP - B7
+stands. Transcripts are not either, so `qa_evasiveness_shift` stays blocked.
+
+### Original entry (2026-07-31), kept for the record
+
 
 **Blocks:** P3.3–P3.7, P3.11 (Gate G3); transitively P4–P6, P8–P12 full-data runs.
 **Not blocked:** P3.1 (connector framework), P3.2 (EDGAR — keyless), P3.8 (FRED), all of Phase 2, Phase 7 scaffolding, CC tasks.
