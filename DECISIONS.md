@@ -1477,3 +1477,130 @@ already triggered and been carried for at least one green run before it was noti
 Three allowlisted advisories remain, all still vulnerable and all still justified in
 `frontend/audit-ci.jsonc`: two postcss and one sharp, each bundled inside `next` itself
 where no upgrade reaches them. `audit-ci` exits 0. Frontend suite: 48 passed.
+
+## D-046 — A WRDS Day Pass cannot feed this system; the path is a full UChicago account (2026-08-04)
+
+The operator obtained a **WRDS Day Pass**, and B1 had recommended exactly that as the
+fast path. **B1 was wrong**, and the correction is worth more than the pass: a Day Pass
+unblocks nothing here.
+
+**A Day Pass is web-interface only.** WRDS's own *Getting Started* guide says of the
+Access Pass that it "does not provide disk storage or access to the WRDS computing
+cloud", and the live Terms of Use enumerate four access methods with *Daypass* listed
+under website access, separately from SSH-to-WRDS-Cloud and from remote database
+connections. The mechanism is the reason: a Day Pass authenticates by **emailed magic
+link** against an institutional IP and **never issues a WRDS username/password** — which
+is exactly what `wrds-pgdata.wharton.upenn.edu:9737` and WRDS Cloud SSH require (with
+Duo push MFA on top, per the live MFA page). There is no credential to put in a
+`.pgpass`, a connection string, or an SSH login. No `wrds`-python, psycopg, RPostgres or
+Stata-ODBC workflow can run under one.
+
+**Nor can the web channel be scripted instead.** The Terms of Use forbid automating
+website logins and queries, permitting automation only on the WRDS Cloud. So the one
+channel a Day Pass *does* provide is closed to a connector by licence as well as by
+mechanism. Both doors, not one.
+
+**The path is a full University of Chicago WRDS account** — free, the operator is
+eligible ("Current students, faculty and staff"), registered with a UChicago or Chicago
+Booth address. It grants web + SSH + PostgreSQL + 10GB storage. Its only cost is
+**local administrator approval latency**, and that latency is the entire reason a Day
+Pass is tempting. Use one for browsing the Data Navigator while the account is pending —
+that is genuinely useful, because entitlement must be verified before any extraction is
+designed — and for nothing else.
+
+**A correction to my own framing, too.** I told the operator a Day Pass was a
+24-hour clock not to be wasted. It is 1–3 days, institution-configurable, and
+**unlimited and renewable**: UChicago's own guide says "There is no limit to the number
+of Day Passes you can request." The urgency was invented. The real scarcity is
+administrator approval, which urgency-framing actively distracts from — I created
+pressure on the resource that is free and none on the resource that is slow.
+
+**Data does not enter this repository, and that is now a licence finding rather than a
+house rule.** The CRSP Standard Data Subscription Agreement requires erasure of the
+original and all copies within 30 days of cancellation, certified in writing; its only
+archival carve-out covers data incidentally commingled in backups, which must be
+destroyed unused if a restore surfaces it; and under academic terms CRSP data may not be
+installed on personally-owned machines at all, only *insubstantial extracts* temporarily.
+Public-repository commits are prohibited outright by the redistribution clauses. Private
+repositories were assessed as very likely non-compliant — that reading is inference, not
+a quoted clause, and is recorded as inference. Store extracts outside the tree, commit a
+manifest and a hash, reproduce by re-extraction.
+
+**Entitlement must be checked before extraction is designed, not after.** `list_libraries()`
+on a real account is entitlement-filtered and is therefore a genuine access test. The
+Compustat point-in-time products are **four separately licensed schemas** (`comp_snapshot`,
+`comp_pit`, `comp_ph`, `comp_urq`), and institutional entitlement to them is genuinely at
+risk — Dartmouth's access to Compustat Point in Time and Snapshot ended 2025-07-31. If
+only `compsamp_snapshot` / `snapsamp` come back, those are samples, not the product, and
+the PIT plan must be abandoned in favour of standard files plus an explicit lag, with the
+limitation written down rather than papered over.
+
+## D-047 — Groq free tier: the cap is tokens-per-day, and a dollar governor cannot see it (2026-08-04)
+
+The operator has a **Groq free-tier key**: no credit card, no credits balance, no
+per-token charge, gated purely by rate limits. This unblocks part of B4 — and it breaks
+the cost governor's central assumption in a way worth stating precisely, because the
+failure is silent.
+
+**I4 says no result is ever reported gross, and D-032 refuses to run against unconfigured
+prices, because a cap enforced against a made-up price enforces nothing.** A free tier is
+the degenerate case: the price is genuinely `0`, so a dollar cap is not *wrong*, it is
+**unfalsifiable**. It can never trip. Configure `$50/month` against a $0 price and the
+governor reports healthy spend right up to the moment the provider starts returning 429s
+mid-run — and a batch that dies two-thirds through has produced a *partial* extraction
+set, which is worse than none, because partial sets are the kind of thing that gets
+analysed anyway.
+
+**The real budget is tokens-per-day, per model, org-scoped.** Groq's free plan, as
+fetched from the live limits page on 2026-08-04:
+
+| model | RPM | RPD | TPM | TPD |
+|---|---|---|---|---|
+| `llama-3.1-8b-instant` | 30 | 14,400 | 6k | **500k** |
+| `llama-3.3-70b-versatile` | 30 | 1,000 | 12k | **100k** |
+| `openai/gpt-oss-120b` | 30 | 1,000 | 8k | **200k** |
+| `openai/gpt-oss-20b` | 30 | 1,000 | 8k | **200k** |
+| `openai/gpt-oss-safeguard-20b` | 30 | 1,000 | 8k | **200k** |
+| `qwen/qwen3.6-27b` | 30 | 1,000 | 8k | **200k** |
+
+The widely-quoted "14,400 free requests per day" is marketing: it is one model's RPD, and
+TPD binds long before RPD does. Summed, the account has **~1.4M tokens/day** — roughly
+**600 calls/day** at a typical 2.3k-token extraction, i.e. about 3.2 hours of saturated
+throughput and ~21 hours hard-blocked.
+
+**Two constraints bite before the daily cap does.** *Schema-strict* structured output
+(constrained decoding, guaranteed schema compliance) exists only on `openai/gpt-oss-20b`
+and `openai/gpt-oss-120b`; every other free model offers `json_object`, which guarantees
+valid JSON **syntax and nothing about the schema** — a distinction that will produce
+plausible, parseable, wrong extractions if it is missed. And **TPM caps per-request size
+at ~6–12k tokens**, far below the advertised 131,072-token context window: a single
+oversized request fails outright with a 413. Chunking is mandatory, not an optimisation.
+
+**Decision: model the free tier as a token budget, not a spend budget**, and let the
+governor refuse a batch it cannot finish rather than discover exhaustion at 429. The
+existing refusal-without-configured-caps behaviour is kept and extended, not replaced;
+the unit changes from dollars to tokens, and the horizon from monthly to daily.
+
+**Provider notes that are decisions, not trivia.** The API is OpenAI-compatible
+(`https://api.groq.com/openai/v1`, bearer auth, the official `openai` client works).
+**Zero Data Retention must be enabled in Data Controls before any third-party document
+text is sent** — this system sends SEC filing text, which is public, but the habit is
+the point. Groq's terms are materially safer for third-party text than Google's Gemini
+free tier, which trains on submitted data and permits human review; Gemini's *throughput*
+is better (no TPD cap at all), and that tradeoff is recorded here rather than silently
+resolved. Cerebras is now a $5 card-gated trial and is **disqualified** for a
+zero-budget operator; OpenRouter's free tier is 50 requests/day and is disqualified for
+volume. Kimi/Moonshot, Mixtral, Gemma, Llama 4 and Qwen3-32B are **deprecated on Groq as
+of 2026** — do not build against those IDs.
+
+**What the free tier can and cannot reach:** the ~600-call golden set fits in about a
+day; the ~600k-call historical backfill would take years. That split is favourable, not
+merely tolerable — G7 is the gate that decides whether LLM features earn their keep, and
+it is the one that fits. A backfill that was never affordable is also one that was never
+needed until G7 passes.
+
+**The key was pasted into a chat transcript twice and must be treated as burned.** It was
+never written to the repository — verified: no Groq-shaped string in the working tree, no
+match in git history under `git log -S`, `.env` ignored at `.gitignore:2`. It has not been
+used. Rotation was requested; keys reach this system through `GROQ_API_KEY` in the
+environment and through nothing else (I5).
