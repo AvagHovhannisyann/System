@@ -33,7 +33,7 @@ services:
     # the `mlflow` client in uv.lock resolves to: client and server share a
     # backing-store schema, and a floating tag would let a `docker compose pull`
     # migrate the store out from under the pinned client.
-    image: ghcr.io/mlflow/mlflow:v3.15.0
+    image: ghcr.io/mlflow/mlflow:v3.2.0
     command:
       - mlflow
       - server

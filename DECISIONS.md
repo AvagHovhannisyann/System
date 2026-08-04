@@ -1392,3 +1392,35 @@ transcripts, so `qa_evasiveness_shift` remains blocked (B1 addendum). Access bei
 is also not the same as the connector being written: P3.3–P3.6 are still unbuilt, and the
 D-015 requirement to **validate point-in-time correctness before trusting a feed** applies to
 CRSP exactly as it would have to a paid vendor.
+
+## D-044 — CVE-2026-69247: the security fix costs thirteen MLflow versions, and that is the right trade (2026-08-04)
+
+A new advisory landed against `cryptography` 49.0.0 (**CVE-2026-69247**, fixed in 50.0.0) and
+turned the security job red on a **docs-only commit** — the classic shape of a vulnerability
+published against a dependency that was already there.
+
+**This one is not routine.** `cryptography` is not an incidental dependency: it *is* the I5
+mechanism. Fernet encrypts every provider API key at rest, with the KEK from the environment
+(CC.0, §7). A CVE here sits directly on the secret-isolation path.
+
+**Raising the floor to `>=50` forces MLflow from 3.15.0 down to 3.2.0.** Not a resolver
+preference — genuinely unsatisfiable, and the resolver says so outright: *"because your
+project depends on cryptography>=50 and mlflow>=3.15, we can conclude that your project's
+requirements are unsatisfiable."*
+
+**Decision: take the security fix.** `cryptography` protects credentials; MLflow records
+experiments. A thirteen-version downgrade in experiment tracking is a real cost and is
+recorded as one, but it is not a security cost, and the alternative is knowingly shipping a
+CVE on the path that protects secrets. `pip-audit` re-run afterwards: **no known
+vulnerabilities**.
+
+**The compose image tag moved with it, and a test forced that.** CC.3 pinned
+`ghcr.io/mlflow/mlflow` to the version `uv.lock` resolves the *client* to, because client and
+server share a backing-store schema and drift between them is silent.
+`test_mlflow_image_is_pinned_to_the_locked_client_version` failed the moment the lock moved —
+which is precisely why it asserts the equality rather than a literal. Tag now `v3.2.0`,
+verified to exist in the registry (HTTP 200) rather than assumed.
+
+**Revisit when MLflow ships a release compatible with `cryptography>=50`.** The floor in
+`pyproject.toml` carries a note pointing here, so a future reader bumping MLflow "helpfully"
+finds out first that doing so reopens a credential-path CVE.

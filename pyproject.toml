@@ -17,7 +17,9 @@ dependencies = [
     "greenlet>=3",
     "celery[redis]>=5.4",
     "httpx>=0.27",        # runtime: connector HTTP client (P3.2 EDGAR onward)
-    "cryptography>=43",   # runtime: Fernet key encryption at rest (CC.0, §7)
+    "cryptography>=50",   # runtime: Fernet key encryption at rest (CC.0, §7). Floor raised
+                          # from 43 for CVE-2026-69247, fixed in 50.0.0 — this library IS
+                          # the I5 mechanism, so a CVE here is on the secret-isolation path.
     "itsdangerous>=2.2",  # runtime: signed CSRF tokens (CC.2)
     "numpy>=2.0",         # ML/math stack (§3)
     "pandas>=2.2",
