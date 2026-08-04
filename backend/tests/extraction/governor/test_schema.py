@@ -184,13 +184,39 @@ def test_the_table_is_append_only_by_trigger() -> None:
     assert "CREATE FUNCTION llm_spend_ledger_append_only_guard()" in statements
 
 
-def test_the_provider_vocabulary_matches_the_enum_and_the_orm() -> None:
-    """Three spellings of one vocabulary; drift fails the suite rather than a database."""
+def test_the_enum_and_the_orm_spell_one_vocabulary() -> None:
+    """Drift between the two live spellings fails the suite rather than a database."""
+    from_models = {value.strip().strip("'") for value in PROVIDER_NAMES_SQL.split(",")}
+    from_enum = {member.value for member in Provider}
+    assert from_models == from_enum
+
+
+def test_this_migrations_vocabulary_is_frozen_and_the_current_one_only_widens_it() -> None:
+    """0013 keeps what it shipped, and the vocabulary may grow but never shrink.
+
+    This used to assert 0013 == ORM == enum. It no longer can, and the reason is
+    the point: a migration records the schema at its own point in the chain, so
+    when a provider is added the earlier revisions keep their set and a new
+    revision widens it (0018 for ``groq``). Re-pointing this at the enum would
+    have required editing an applied migration.
+
+    The replacement is not weaker. *Frozen* pins 0013 against a helpful edit, and
+    the **superset** clause asserts something the old equality could not: the
+    vocabulary is append-only. Removing a provider would leave rows in
+    ``llm_spend_ledger`` — an append-only table nothing may edit or delete —
+    naming a value the CHECK no longer admits, so the table could not be restored
+    from its own contents and the next widening's ``ADD CONSTRAINT`` would fail
+    against rows nobody can remove.
+    """
     module = _load()
     from_migration = {value.strip().strip("'") for value in module._PROVIDER_NAMES_SQL.split(",")}
     from_models = {value.strip().strip("'") for value in PROVIDER_NAMES_SQL.split(",")}
-    from_enum = {member.value for member in Provider}
-    assert from_migration == from_models == from_enum
+
+    assert from_migration == {"anthropic", "openai"}
+    assert from_migration <= from_models, (
+        "a provider was removed from the vocabulary; rows already written to the "
+        "append-only spend ledger would name a value the CHECK now rejects"
+    )
 
 
 # --------------------------------------------------------------------------

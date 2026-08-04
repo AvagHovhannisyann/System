@@ -6,14 +6,43 @@ Format: ID, opened date, what is blocked, what is needed, status.
 
 ## B1 — Data vendor selection + API keys — RESOLUTION PATH FOUND (2026-08-03)
 
+**⚠ 2026-08-04 CORRECTION — A DAY PASS CANNOT FEED THIS SYSTEM. See D-046.** The
+sentence below recommending a Day Pass as the fast path was wrong, and acting on it
+wastes the operator's time rather than unblocking anything. A WRDS Access Pass
+("Day Pass") is **web-interface only**: WRDS's own Getting Started guide states it
+"does not provide disk storage or access to the WRDS computing cloud", and it
+authenticates by emailed magic link, so **no WRDS username/password is ever issued** —
+which is precisely the credential `wrds-pgdata.wharton.upenn.edu:9737` and WRDS Cloud
+SSH both require. No `wrds`-python / psycopg connector can run under one. The WRDS
+Terms of Use separately **forbid scripting or automating website logins and queries**,
+permitting automation only on the WRDS Cloud, so there is no compliant way to script
+extraction from the one channel a Day Pass does provide either.
+
+**The actual path is a full UChicago WRDS account** — free, the operator is eligible,
+and it grants web + SSH + PostgreSQL + 10GB storage. It requires local administrator
+approval, which is the only real cost (latency). Register with a UChicago or Chicago
+Booth address at `guides.lib.uchicago.edu/wrds`. **Do this first; everything else in
+B1 waits on it.** A Day Pass remains useful for *one* thing: browsing the Data
+Navigator while the account is pending, to confirm which products the institution is
+actually entitled to. Day Passes are unlimited and renewable on expiry, so a wasted one
+costs nothing — the earlier "24-hour clock, don't waste it" framing was also wrong.
+
 **2026-08-03: superseded by D-043 — use CRSP/Compustat via WRDS, free through the
 operator's University of Chicago affiliation, instead of purchasing Sharadar.** CRSP is
 the reference survivorship-bias-free database and carries **delisting returns**, which no
-free source does and which Sharadar would have supplied less completely. Access is via
-`guides.lib.uchicago.edu/wrds` (a Day Pass grants access in minutes; a full student
-account needs local administrator approval). Licence covers **academic research and
-teaching, not commercial use** — compatible with this system, which is paper-only by
-design and has no code path to real capital.
+free source does and which Sharadar would have supplied less completely. Licence covers
+**academic research and teaching, not commercial use** — compatible with this system,
+which is paper-only by design and has no code path to real capital.
+
+**Data may not live in this repository, and that is a licence term, not just hygiene.**
+The CRSP Standard Data Subscription Agreement requires erasure of the original and all
+copies within 30 days of cancellation, with written certification; its only archival
+carve-out is for data incidentally commingled in backups, which must be destroyed
+without use if a restore surfaces it. Committing extracts to a public repository is
+prohibited outright under the redistribution clauses; a private repository is very
+likely non-compliant too. Store extracts outside the tree, commit a manifest and hash,
+and reproduce by re-extraction. Credentials are never shared with a collaborator under
+any circumstance — the Terms of Use make that grounds for immediate termination.
 
 **Still open even with access granted:** the connectors (P3.3-P3.6) are unwritten, and
 D-015's requirement to validate point-in-time correctness before trusting a feed applies
@@ -122,10 +151,51 @@ width**.
 **200 names, 5 years, 2-model ensemble**. If the LLM features do not beat the Phase 5
 baseline factors, the money is saved and the finding is identical. See D-015.
 
-**Still needed from the human:** API keys for 2–3 **cost-tier** models (directive §5-P7
-forbids frontier models for extraction); confirmation of the $50/month steady-state cap;
-separate approval for the pilot backfill spend. The cost governor refuses to run without
-configured caps.
+### ⚠ 2026-08-04 — a free-tier key changes the shape of this blocker, not just its size
+
+The operator has a **Groq free-tier key** (no card, no credits, no per-token charge).
+That is a real unblock for part of G7 — and it silently breaks the assumption every
+number above rests on. See D-047.
+
+**On a free tier the binding constraint is not money, it is tokens-per-day.** Groq's
+free plan is capped per model per day; the six free chat models sum to roughly
+**1.4M tokens/day** for the whole account. At a typical ~2.3k-token extraction call
+that is on the order of **600 calls/day**, and the account is hard-blocked by TPD
+exhaustion for most of each 24 hours. A dollar cap set against a $0 price is not a
+cap at all — it can never trip, so the run does not stop, it just starts failing 429s
+partway through. This is D-032's "a cap enforced against a made-up price enforces
+nothing" wearing a different hat.
+
+**What this makes feasible, and what it does not:**
+
+| Workload | Calls | Free-tier wall-clock |
+|---|---|---|
+| **Golden set (300 docs), one construct, 2-model ensemble** | ~600 | ~1 day — **feasible** |
+| Golden set, chunked ×5, 2-model | ~3k | days to ~2–3 weeks depending on model mix — feasible |
+| Phase-8 pilot (200 names, 5yr, 2-model) | ~80k | ~4 months — **not feasible** |
+| Full historical backfill | ~600k | years — **not feasible** |
+
+So **G7 is reachable on the free tier and the backfill is not**, which is a better
+split than it looks: G7 is the gate that decides whether LLM features earn their
+keep, and it is precisely the one that fits. If it fails, no backfill spend was ever
+needed. Constraint noted, not worked around.
+
+**Two further constraints that bite before the limits do:** schema-strict structured
+output is available only on `openai/gpt-oss-20b` and `openai/gpt-oss-120b` (200k TPD
+each) — every other free model offers `json_object` mode, which guarantees syntax but
+not schema. And free-tier **TPM** caps effective per-request size at ~6–12k tokens
+depending on model, far below the advertised 131k context window, so chunking is
+mandatory rather than an optimisation.
+
+**Still needed from the human:** the Groq key present as `GROQ_API_KEY` in `.env`
+(**never pasted into chat** — see D-047), plus Zero Data Retention enabled in Groq's
+Data Controls before any third-party document text is sent. The original asks below
+stand only if the project later leaves the free tier.
+
+**Still needed from the human (paid path, deferred):** API keys for 2–3 **cost-tier**
+models (directive §5-P7 forbids frontier models for extraction); confirmation of the
+$50/month steady-state cap; separate approval for the pilot backfill spend. The cost
+governor refuses to run without configured caps.
 
 ---
 

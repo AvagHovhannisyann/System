@@ -11,10 +11,13 @@ would only defer the failure from configuration time to call time, which is
 exactly the direction §9 tells this system not to move failures in.
 
 The consequence is stated rather than hidden: **adding a provider is a code and
-migration change.** The vocabulary appears three times — here, in
-``backend.db.models.PROVIDER_NAMES_SQL``, and in migration 0009's CHECK
-constraints — and drift between the first two fails a unit test rather than
-reaching a database.
+migration change.** The vocabulary appears here and in
+``backend.db.models.PROVIDER_NAMES_SQL``, and drift between the two fails a unit
+test rather than reaching a database. In the schema it is a CHECK constraint,
+first declared by migration 0009 and *widened* by a later revision each time a
+member is added — 0018 for :attr:`Provider.GROQ`. Earlier revisions keep the
+vocabulary they shipped with, because a migration records what the schema was at
+its point in the chain, not what it is now.
 
 What is *not* here
 ------------------
@@ -44,6 +47,7 @@ class Provider(StrEnum):
     """
 
     ANTHROPIC = "anthropic"
+    GROQ = "groq"
     OPENAI = "openai"
 
 

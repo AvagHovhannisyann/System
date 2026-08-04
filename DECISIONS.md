@@ -1477,3 +1477,257 @@ already triggered and been carried for at least one green run before it was noti
 Three allowlisted advisories remain, all still vulnerable and all still justified in
 `frontend/audit-ci.jsonc`: two postcss and one sharp, each bundled inside `next` itself
 where no upgrade reaches them. `audit-ci` exits 0. Frontend suite: 48 passed.
+
+## D-046 — A WRDS Day Pass cannot feed this system; the path is a full UChicago account (2026-08-04)
+
+The operator obtained a **WRDS Day Pass**, and B1 had recommended exactly that as the
+fast path. **B1 was wrong**, and the correction is worth more than the pass: a Day Pass
+unblocks nothing here.
+
+**A Day Pass is web-interface only.** WRDS's own *Getting Started* guide says of the
+Access Pass that it "does not provide disk storage or access to the WRDS computing
+cloud", and the live Terms of Use enumerate four access methods with *Daypass* listed
+under website access, separately from SSH-to-WRDS-Cloud and from remote database
+connections. The mechanism is the reason: a Day Pass authenticates by **emailed magic
+link** against an institutional IP and **never issues a WRDS username/password** — which
+is exactly what `wrds-pgdata.wharton.upenn.edu:9737` and WRDS Cloud SSH require (with
+Duo push MFA on top, per the live MFA page). There is no credential to put in a
+`.pgpass`, a connection string, or an SSH login. No `wrds`-python, psycopg, RPostgres or
+Stata-ODBC workflow can run under one.
+
+**Nor can the web channel be scripted instead.** The Terms of Use forbid automating
+website logins and queries, permitting automation only on the WRDS Cloud. So the one
+channel a Day Pass *does* provide is closed to a connector by licence as well as by
+mechanism. Both doors, not one.
+
+**The path is a full University of Chicago WRDS account** — free, the operator is
+eligible ("Current students, faculty and staff"), registered with a UChicago or Chicago
+Booth address. It grants web + SSH + PostgreSQL + 10GB storage. Its only cost is
+**local administrator approval latency**, and that latency is the entire reason a Day
+Pass is tempting. Use one for browsing the Data Navigator while the account is pending —
+that is genuinely useful, because entitlement must be verified before any extraction is
+designed — and for nothing else.
+
+**A correction to my own framing, too.** I told the operator a Day Pass was a
+24-hour clock not to be wasted. It is 1–3 days, institution-configurable, and
+**unlimited and renewable**: UChicago's own guide says "There is no limit to the number
+of Day Passes you can request." The urgency was invented. The real scarcity is
+administrator approval, which urgency-framing actively distracts from — I created
+pressure on the resource that is free and none on the resource that is slow.
+
+**Data does not enter this repository, and that is now a licence finding rather than a
+house rule.** The CRSP Standard Data Subscription Agreement requires erasure of the
+original and all copies within 30 days of cancellation, certified in writing; its only
+archival carve-out covers data incidentally commingled in backups, which must be
+destroyed unused if a restore surfaces it; and under academic terms CRSP data may not be
+installed on personally-owned machines at all, only *insubstantial extracts* temporarily.
+Public-repository commits are prohibited outright by the redistribution clauses. Private
+repositories were assessed as very likely non-compliant — that reading is inference, not
+a quoted clause, and is recorded as inference. Store extracts outside the tree, commit a
+manifest and a hash, reproduce by re-extraction.
+
+**Entitlement must be checked before extraction is designed, not after.** `list_libraries()`
+on a real account is entitlement-filtered and is therefore a genuine access test. The
+Compustat point-in-time products are **four separately licensed schemas** (`comp_snapshot`,
+`comp_pit`, `comp_ph`, `comp_urq`), and institutional entitlement to them is genuinely at
+risk — Dartmouth's access to Compustat Point in Time and Snapshot ended 2025-07-31. If
+only `compsamp_snapshot` / `snapsamp` come back, those are samples, not the product, and
+the PIT plan must be abandoned in favour of standard files plus an explicit lag, with the
+limitation written down rather than papered over.
+
+## D-047 — Groq free tier: the cap is tokens-per-day, and a dollar governor cannot see it (2026-08-04)
+
+The operator has a **Groq free-tier key**: no credit card, no credits balance, no
+per-token charge, gated purely by rate limits. This unblocks part of B4 — and it breaks
+the cost governor's central assumption in a way worth stating precisely, because the
+failure is silent.
+
+**I4 says no result is ever reported gross, and D-032 refuses to run against unconfigured
+prices, because a cap enforced against a made-up price enforces nothing.** A free tier is
+the degenerate case: the price is genuinely `0`, so a dollar cap is not *wrong*, it is
+**unfalsifiable**. It can never trip. Configure `$50/month` against a $0 price and the
+governor reports healthy spend right up to the moment the provider starts returning 429s
+mid-run — and a batch that dies two-thirds through has produced a *partial* extraction
+set, which is worse than none, because partial sets are the kind of thing that gets
+analysed anyway.
+
+**The real budget is tokens-per-day, per model, org-scoped.** Groq's free plan, as
+fetched from the live limits page on 2026-08-04:
+
+| model | RPM | RPD | TPM | TPD |
+|---|---|---|---|---|
+| `llama-3.1-8b-instant` | 30 | 14,400 | 6k | **500k** |
+| `llama-3.3-70b-versatile` | 30 | 1,000 | 12k | **100k** |
+| `openai/gpt-oss-120b` | 30 | 1,000 | 8k | **200k** |
+| `openai/gpt-oss-20b` | 30 | 1,000 | 8k | **200k** |
+| `openai/gpt-oss-safeguard-20b` | 30 | 1,000 | 8k | **200k** |
+| `qwen/qwen3.6-27b` | 30 | 1,000 | 8k | **200k** |
+
+The widely-quoted "14,400 free requests per day" is marketing: it is one model's RPD, and
+TPD binds long before RPD does. Summed, the account has **~1.4M tokens/day** — roughly
+**600 calls/day** at a typical 2.3k-token extraction, i.e. about 3.2 hours of saturated
+throughput and ~21 hours hard-blocked.
+
+**Two constraints bite before the daily cap does.** *Schema-strict* structured output
+(constrained decoding, guaranteed schema compliance) exists only on `openai/gpt-oss-20b`
+and `openai/gpt-oss-120b`; every other free model offers `json_object`, which guarantees
+valid JSON **syntax and nothing about the schema** — a distinction that will produce
+plausible, parseable, wrong extractions if it is missed. And **TPM caps per-request size
+at ~6–12k tokens**, far below the advertised 131,072-token context window: a single
+oversized request fails outright with a 413. Chunking is mandatory, not an optimisation.
+
+**Decision: model the free tier as a token budget, not a spend budget**, and let the
+governor refuse a batch it cannot finish rather than discover exhaustion at 429. The
+existing refusal-without-configured-caps behaviour is kept and extended, not replaced;
+the unit changes from dollars to tokens, and the horizon from monthly to daily.
+
+**Provider notes that are decisions, not trivia.** The API is OpenAI-compatible
+(`https://api.groq.com/openai/v1`, bearer auth, the official `openai` client works).
+**Zero Data Retention must be enabled in Data Controls before any third-party document
+text is sent** — this system sends SEC filing text, which is public, but the habit is
+the point. Groq's terms are materially safer for third-party text than Google's Gemini
+free tier, which trains on submitted data and permits human review; Gemini's *throughput*
+is better (no TPD cap at all), and that tradeoff is recorded here rather than silently
+resolved. Cerebras is now a $5 card-gated trial and is **disqualified** for a
+zero-budget operator; OpenRouter's free tier is 50 requests/day and is disqualified for
+volume. Kimi/Moonshot, Mixtral, Gemma, Llama 4 and Qwen3-32B are **deprecated on Groq as
+of 2026** — do not build against those IDs.
+
+**What the free tier can and cannot reach:** the ~600-call golden set fits in about a
+day; the ~600k-call historical backfill would take years. That split is favourable, not
+merely tolerable — G7 is the gate that decides whether LLM features earn their keep, and
+it is the one that fits. A backfill that was never affordable is also one that was never
+needed until G7 passes.
+
+**The key was pasted into a chat transcript twice and must be treated as burned.** It was
+never written to the repository — verified: no Groq-shaped string in the working tree, no
+match in git history under `git log -S`, `.env` ignored at `.gitignore:2`. It has not been
+used. Rotation was requested; keys reach this system through `GROQ_API_KEY` in the
+environment and through nothing else (I5).
+
+## D-048 — Groq is a first-class provider, and the vocabulary widens rather than gets edited (2026-08-04)
+
+Adding `groq` to `Provider` is mechanical — the enum, `PROVIDER_NAMES_SQL`, a probe
+endpoint, and a migration — and three of those four were. The fourth turned out to be a
+judgement call worth recording, and it surfaced a latent bug.
+
+**The vocabulary widens; earlier revisions keep what they shipped with.** Migrations 0009
+and 0013 declare the `provider_known` CHECK. Adding a member could have been done by
+editing those files, and a database created from scratch would have come out correct —
+which is exactly what makes it tempting. It is wrong because **a migration records what
+the schema was at its point in the chain, not what it is now**: a database migrated last
+week and one created today would disagree about what 0009 did, and nothing in the chain
+would say so. So 0018 widens instead, and the drift tests were re-aimed: 0009 and 0013
+pinned to the *historical* set by frozen literal, 0018 to the *current* set, and the
+current set to the enum.
+
+**Two tests changed, and neither was weakened to pass — one got strictly stronger.**
+`test_the_provider_vocabulary_matches_the_enum_and_the_orm` asserted 0013 == ORM == enum,
+which the widening makes false. Its replacement pins 0013's set *and* asserts the current
+set is a **superset** of it — an invariant the old equality could not express: the
+vocabulary is append-only. Removing a provider would strand rows in `llm_spend_ledger`, an
+append-only table nothing may edit or delete, naming a value the CHECK no longer admits;
+the table could not be rebuilt from its own contents and the next widening's
+`ADD CONSTRAINT` would fail against rows nobody can remove.
+
+**A new test found a real bug in the migration I had just written.** 0009 declares the
+CHECK as a bare `provider_known` and relies on the metadata naming convention
+(`ck_%(table_name)s_%(constraint_name)s`) to expand it — expansion that happens for a
+constraint attached to a table being *created*. My widening copied that style into
+`ALTER TABLE ... DROP CONSTRAINT provider_known`, which gets no such expansion and would
+have failed with *"constraint does not exist"* — on a migration, against a real database,
+in the one place this suite cannot reach without Docker. Caught by
+`test_the_widening_covers_every_table_that_constrains_a_provider`, whose non-vacuity
+assertion fired first (`no mapped table declares provider_known`) because the metadata
+spells the name expanded. Verified the true name by rendering SQL offline
+(`alembic upgrade 0009 --sql`) rather than reasoning about Alembic's behaviour, and
+`test_the_widening_names_constraints_the_way_the_database_does` now holds the migration to
+the ORM's spelling.
+
+**The probe needed an endpoint and nothing else.** `build_probe_request` branches to
+`x-api-key` for Anthropic and falls through to `Authorization: Bearer`, which is Groq's
+shape too. The fallback is safe only because the *endpoint* is a per-provider lookup that
+refuses an unknown provider: the fallback picks a header shape, never a destination.
+Groq's URL sits under an `/openai/v1` prefix because it serves an OpenAI-compatible API —
+the prefix is part of Groq's own URL and the host, which is what decides where a
+credential travels, is `api.groq.com`.
+
+**What this does not do.** It does not make a call possible. There is still no
+`ModelClient` implementation anywhere in this repository — only `UnconfiguredModelClient`,
+which refuses — so Groq is now storable, assignable and probe-able, and nothing more. The
+token-budget governor D-047 calls for, and the HTTP client beneath it, are unbuilt. Saying
+"Groq is wired up" would be false.
+
+## D-049 — The throughput governor: a free tier's cap is a different unit, not a smaller number (2026-08-04)
+
+D-047 established that a Groq free tier's binding constraint is tokens-per-day. This
+records what was built for it and, more usefully, what was deliberately *not*.
+
+**The problem restated precisely, because the obvious reading is wrong.** The instinct is
+"a free tier is just a very small budget, so configure a small cap". It is not a smaller
+number, it is a **different unit**, and the difference is what makes the failure silent.
+On a free tier the price is genuinely `0` — not unknown, not unconfigured, correct. A
+dollar cap against a correct zero price is therefore not *wrong*, it is **unfalsifiable**:
+it can never trip, so the run never stops. It just starts failing 429s two-thirds of the
+way through, having already written a partial extraction set. Partial sets are worse than
+none, because they get analysed anyway. D-032 refused unconfigured prices on the grounds
+that a cap against a made-up price enforces nothing; this is the degenerate case, where
+the price is right and the cap still enforces nothing.
+
+**Built:** `backend/extraction/governor/throughput.py` — `ModelThroughputLimit`,
+`ThroughputBook`, `require_request_fits`, `daily_call_capacity`, `plan_batch`. Pure
+arithmetic over configured limits: no state, no provider contact, no spend decision.
+
+**Three refusals, deliberately not one.** An unconfigured model (*an operator has work to
+do*), a request exceeding the tier ceiling (*this can never be sent*), and an infeasible
+batch (*this cannot finish in time*) are different conditions with different fixes, so
+they are different exception types. `RequestExceedsTierCeilingError` in particular is
+**not** a `GovernorConfigurationError`, and a test pins that: a caller catching
+configuration errors to prompt for setup must not swallow a ceiling breach, whose fix is
+smaller chunks.
+
+**The ceiling is the trap worth naming.** A per-minute token allowance is also a
+**per-request ceiling** — one request larger than the whole minute's allowance can never
+fit inside a minute. Providers answer 413, not 429, and backoff never helps. On the tier
+that motivated this it is ~6-12k tokens against a **131,072-token advertised context
+window**. A caller who sizes chunks against the context window builds a workload where
+*every single request* fails, and the resulting error does not mention chunk size.
+
+**`None` and `0` are different statements, and both are needed.** `None` is "not capped";
+`0` is "capped at nothing". Optional fields are not defensive style here — some free-tier
+models publish no tokens-per-day at all, and the main alternative (Gemini) publishes none
+whatsoever, which is exactly what makes it better for token-heavy documents. Encoding
+"uncapped" as a large number would have made that indistinguishable from a real limit and
+invited comparison against a horizon it does not respect; `plan_batch` returns
+`days_required=None` instead.
+
+**A validator caught a contradiction in my own tests.** `ModelThroughputLimit` refuses a
+per-minute allowance exceeding the per-day allowance, on the ground that a day contains the
+minute — intended to catch a vendor's limits table read into the wrong pair of columns.
+The first draft of the tests encoded "this model is disabled" as `tokens_per_day=0` while
+leaving `tokens_per_minute=8000`, which reads as *"no tokens today, but eight thousand in
+any given minute"*. The module refused it, correctly, and **the tests were wrong, not the
+code**. A test now pins that case directly.
+
+**Deliberately absent, and the absences are the point.**
+
+*No numbers.* `CATALOG_THROUGHPUT_LIMITS` ships empty, exactly as `CATALOG_PRICES` does,
+with the symmetric test. A published rate limit is a fact about a vendor's pricing page on
+the day it was read; in a module it would be read as fact long after it stopped being true,
+and a stale limit that is too **permissive** produces precisely the 429 this exists to
+prevent. The observed figures live in D-047, dated.
+
+*No consumption ledger.* Planning assumes a full daily allowance — right for a batch
+planned before it starts, wrong for one resumed mid-day. Stated in `plan_batch`'s own
+docstring rather than buried, with the instruction to pass *remaining* allowance when
+resuming. A durable per-window ledger would need a table and a migration, and building one
+before anything can make a call would be speculative.
+
+*No wiring.* Nothing composes this into the client, because **there is still no
+`ModelClient` implementation in this repository** — only `UnconfiguredModelClient`, which
+refuses. This matches the spend governor, which is also built, tested, and constructed
+nowhere outside its tests. Ordering note for whoever wires them: governor refusals do not
+inherit `ModelCallError`, and `GovernedModelClient` settles a reservation only on
+`ModelCallError`, so a throughput refusal raised *inside* the spend guard would leave a
+reservation neither settled nor released. The throughput check therefore belongs
+**outside** the spend guard, where a refusal happens before any money is reserved.

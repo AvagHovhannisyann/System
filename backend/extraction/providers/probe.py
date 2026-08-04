@@ -107,15 +107,21 @@ question.
 PROBE_ENDPOINTS: Final[Mapping[Provider, str]] = MappingProxyType(
     {
         Provider.ANTHROPIC: "https://api.anthropic.com/v1/models",
+        Provider.GROQ: "https://api.groq.com/openai/v1/models",
         Provider.OPENAI: "https://api.openai.com/v1/models",
     }
 )
 """Authenticated, zero-token listing endpoint per provider.
 
-Both are ``GET`` and both authenticate with the stored key, which is what makes
+All are ``GET`` and all authenticate with the stored key, which is what makes
 them usable as a credential check. Read-only mapping so a caller cannot
 redirect a probe — and therefore a credential — at another host by mutating
 module state.
+
+Groq's endpoint sits under an ``/openai/v1`` prefix because Groq serves an
+OpenAI-compatible API; the prefix is part of Groq's own URL and is **not** a
+sign that the request goes to OpenAI. The host is what decides where the
+credential travels, and it is ``api.groq.com``.
 """
 
 ANTHROPIC_VERSION_HEADER_VALUE: Final = "2023-06-01"
@@ -217,6 +223,13 @@ def build_probe_request(provider: Provider, api_key: str) -> ProbeRequest:
     * Anthropic — ``x-api-key: <key>`` plus ``anthropic-version:
       2023-06-01`` (required on every request).
     * OpenAI — ``Authorization: Bearer <key>``.
+    * Groq — ``Authorization: Bearer <key>``, the same shape as OpenAI's
+      because Groq serves an OpenAI-compatible API.
+
+    Bearer is the fallback branch rather than a per-provider case, so a new
+    provider that uses it needs no edit here. That is only safe because the
+    *endpoint* is looked up per provider above and a provider without one is
+    refused: the fallback chooses a header shape, never a destination.
 
     Args:
         provider: provider to build the request for.
