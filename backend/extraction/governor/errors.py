@@ -59,7 +59,11 @@ __all__ = [
     "GovernorError",
     "LedgerIntegrityError",
     "ModelPriceUnknownError",
+    "RequestExceedsTierCeilingError",
     "SpendCapExceededError",
+    "ThroughputInfeasibleError",
+    "ThroughputLimitUnknownError",
+    "ThroughputLimitsNotConfiguredError",
 ]
 
 
@@ -120,6 +124,58 @@ class CurrencyMismatchError(GovernorConfigurationError):
     Raised rather than converted. This system holds no exchange rate and has no
     business inventing one; a cap in one currency enforced against a price in
     another is a cap enforced against an unstated conversion (I4).
+    """
+
+
+class ThroughputLimitsNotConfiguredError(GovernorConfigurationError):
+    """No throughput limits are configured at all, so nothing may be called (B4).
+
+    The token-budget twin of :class:`CapsNotConfiguredError`, and it exists
+    because a *free* tier makes the money cap unfalsifiable. A price of zero is
+    genuinely correct on a free tier, so a dollar cap against it can never trip:
+    the run does not stop, it starts failing 429s partway through and leaves a
+    partial extraction set (D-047). The limit that can actually be breached is
+    tokens-per-day, and a governor that cannot see it is not governing.
+    """
+
+
+class ThroughputLimitUnknownError(GovernorConfigurationError):
+    """This model has no configured throughput limit, so calls to it are refused.
+
+    Same reasoning as :class:`ModelPriceUnknownError`, in the other unit.
+    Limits are per *model* rather than per provider because that is how the
+    providers publish them — one account's models do not share a token budget,
+    and treating them as if they did would either strand capacity or overrun it.
+    """
+
+
+class RequestExceedsTierCeilingError(GovernorError):
+    """This request can never be sent on this tier, at any time, at any queue depth.
+
+    Not a "wait and retry" condition and not a budget breach: a per-minute token
+    allowance is also a **per-request ceiling**, because a single request larger
+    than the whole minute's allowance can never fit inside one. The provider
+    answers a 413 rather than a 429, and no amount of backoff changes it.
+
+    The trap this names is that the ceiling is far below the advertised context
+    window — on the free tier that motivated this, roughly 6k-12k tokens against
+    a 131,072-token context (D-047). A caller sizing chunks against the context
+    window builds a workload where *every* request fails, and the error that
+    reports it does not mention chunk size.
+    """
+
+
+class ThroughputInfeasibleError(GovernorError):
+    """The batch cannot finish inside the horizon it was given.
+
+    The refusal that makes the free tier honest. Discovering exhaustion at the
+    provider means finding out two-thirds of the way through a run, with a
+    partial extraction set already written — and a partial set is worse than
+    none, because it is the kind of thing that gets analysed anyway.
+
+    Raised *before* the first call, from arithmetic over configured limits, so
+    the operator's choice is made when it is still a choice: shrink the
+    universe, shorten the history, narrow the ensemble, or accept the wall-clock.
     """
 
 

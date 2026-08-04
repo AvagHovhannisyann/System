@@ -1657,3 +1657,77 @@ credential travels, is `api.groq.com`.
 which refuses — so Groq is now storable, assignable and probe-able, and nothing more. The
 token-budget governor D-047 calls for, and the HTTP client beneath it, are unbuilt. Saying
 "Groq is wired up" would be false.
+
+## D-049 — The throughput governor: a free tier's cap is a different unit, not a smaller number (2026-08-04)
+
+D-047 established that a Groq free tier's binding constraint is tokens-per-day. This
+records what was built for it and, more usefully, what was deliberately *not*.
+
+**The problem restated precisely, because the obvious reading is wrong.** The instinct is
+"a free tier is just a very small budget, so configure a small cap". It is not a smaller
+number, it is a **different unit**, and the difference is what makes the failure silent.
+On a free tier the price is genuinely `0` — not unknown, not unconfigured, correct. A
+dollar cap against a correct zero price is therefore not *wrong*, it is **unfalsifiable**:
+it can never trip, so the run never stops. It just starts failing 429s two-thirds of the
+way through, having already written a partial extraction set. Partial sets are worse than
+none, because they get analysed anyway. D-032 refused unconfigured prices on the grounds
+that a cap against a made-up price enforces nothing; this is the degenerate case, where
+the price is right and the cap still enforces nothing.
+
+**Built:** `backend/extraction/governor/throughput.py` — `ModelThroughputLimit`,
+`ThroughputBook`, `require_request_fits`, `daily_call_capacity`, `plan_batch`. Pure
+arithmetic over configured limits: no state, no provider contact, no spend decision.
+
+**Three refusals, deliberately not one.** An unconfigured model (*an operator has work to
+do*), a request exceeding the tier ceiling (*this can never be sent*), and an infeasible
+batch (*this cannot finish in time*) are different conditions with different fixes, so
+they are different exception types. `RequestExceedsTierCeilingError` in particular is
+**not** a `GovernorConfigurationError`, and a test pins that: a caller catching
+configuration errors to prompt for setup must not swallow a ceiling breach, whose fix is
+smaller chunks.
+
+**The ceiling is the trap worth naming.** A per-minute token allowance is also a
+**per-request ceiling** — one request larger than the whole minute's allowance can never
+fit inside a minute. Providers answer 413, not 429, and backoff never helps. On the tier
+that motivated this it is ~6-12k tokens against a **131,072-token advertised context
+window**. A caller who sizes chunks against the context window builds a workload where
+*every single request* fails, and the resulting error does not mention chunk size.
+
+**`None` and `0` are different statements, and both are needed.** `None` is "not capped";
+`0` is "capped at nothing". Optional fields are not defensive style here — some free-tier
+models publish no tokens-per-day at all, and the main alternative (Gemini) publishes none
+whatsoever, which is exactly what makes it better for token-heavy documents. Encoding
+"uncapped" as a large number would have made that indistinguishable from a real limit and
+invited comparison against a horizon it does not respect; `plan_batch` returns
+`days_required=None` instead.
+
+**A validator caught a contradiction in my own tests.** `ModelThroughputLimit` refuses a
+per-minute allowance exceeding the per-day allowance, on the ground that a day contains the
+minute — intended to catch a vendor's limits table read into the wrong pair of columns.
+The first draft of the tests encoded "this model is disabled" as `tokens_per_day=0` while
+leaving `tokens_per_minute=8000`, which reads as *"no tokens today, but eight thousand in
+any given minute"*. The module refused it, correctly, and **the tests were wrong, not the
+code**. A test now pins that case directly.
+
+**Deliberately absent, and the absences are the point.**
+
+*No numbers.* `CATALOG_THROUGHPUT_LIMITS` ships empty, exactly as `CATALOG_PRICES` does,
+with the symmetric test. A published rate limit is a fact about a vendor's pricing page on
+the day it was read; in a module it would be read as fact long after it stopped being true,
+and a stale limit that is too **permissive** produces precisely the 429 this exists to
+prevent. The observed figures live in D-047, dated.
+
+*No consumption ledger.* Planning assumes a full daily allowance — right for a batch
+planned before it starts, wrong for one resumed mid-day. Stated in `plan_batch`'s own
+docstring rather than buried, with the instruction to pass *remaining* allowance when
+resuming. A durable per-window ledger would need a table and a migration, and building one
+before anything can make a call would be speculative.
+
+*No wiring.* Nothing composes this into the client, because **there is still no
+`ModelClient` implementation in this repository** — only `UnconfiguredModelClient`, which
+refuses. This matches the spend governor, which is also built, tested, and constructed
+nowhere outside its tests. Ordering note for whoever wires them: governor refusals do not
+inherit `ModelCallError`, and `GovernedModelClient` settles a reservation only on
+`ModelCallError`, so a throughput refusal raised *inside* the spend guard would leave a
+reservation neither settled nor released. The throughput check therefore belongs
+**outside** the spend guard, where a refusal happens before any money is reserved.
