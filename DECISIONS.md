@@ -1439,3 +1439,41 @@ inspects the wrong target is worse than no verification, because it produces con
 resolution, and the packages that move down carry their own histories. The cost of a
 security bump is not the bump; it is everything the resolver does to accommodate it, and
 that has to be measured before the change is called a fix.
+
+## D-045 — GHSA-7p8r-x3mc-p8w7 (fast-uri): take the patch, and prune a stale allowlist entry (2026-08-04)
+
+A high-severity advisory — *host confusion via backslash authority introducer*,
+`CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N` — was published against `fast-uri`, reached
+transitively through `ajv` 8.20.0 (via `@modelcontextprotocol/sdk`, `ajv-formats`, `conf`).
+It turned the security job red on the *same commit* that fixed the Python side, which is
+worth naming: two unrelated advisories landing on one red check invites treating the second
+as fallout from the first.
+
+**Decision: take the patch.** Fixed in **3.1.5** on the 3.x line (OSV: `[3.0.0, 3.1.5)`
+affected); the lock held 3.1.4 and `ajv` asks for `^3.0.1`, so the patched release is inside
+the existing range. `npm update fast-uri` moved **exactly three lines** of
+`package-lock.json` — version, resolved URL, integrity — and nothing else.
+
+**This is the counter-example to D-044, and the pair is the point.** Both are "a
+high-severity CVE in a transitive dependency", and they resolve oppositely. The difference is
+not severity, exploitability, or how close the package sits to a security boundary — by
+those measures D-044's `cryptography` finding was the *more* alarming of the two. The
+difference is what the resolver has to do to accommodate the fix: here, a patch release
+inside an existing range, costing nothing; there, a floor raise that dragged mlflow down
+thirteen minor versions and opened 26 new advisories. **The cost of a security fix is not
+the fix. It is the resolution.** Measure it before calling it one, in both directions:
+D-044's error was taking a fix that cost 27, and the symmetric error would be refusing this
+one on the strength of that lesson.
+
+**Separately, `GHSA-mh99-v99m-4gvg` (brace-expansion) was removed from the allowlist.** Its
+recorded removal condition — *"when eslint-config-next ships against a patched chain"* — has
+been met: `brace-expansion` now resolves to 1.1.18 and 5.0.9, both patched, and `audit-ci`
+reports the advisory as no longer found. It was removed rather than left in place because a
+matching-nothing allowlist entry is not a no-op: it silently absolves the same advisory if a
+future resolution reintroduces it, and nobody re-reads a passing config. **Removal
+conditions are only worth writing if they are acted on when they trigger** — this one had
+already triggered and been carried for at least one green run before it was noticed.
+
+Three allowlisted advisories remain, all still vulnerable and all still justified in
+`frontend/audit-ci.jsonc`: two postcss and one sharp, each bundled inside `next` itself
+where no upgrade reaches them. `audit-ci` exits 0. Frontend suite: 48 passed.
